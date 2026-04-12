@@ -1,0 +1,430 @@
+//@version=5
+// ================================================================
+// AAC Main Trading Strategy
+// Version   : 1.0
+// Author    : Andrey Alvarado
+// Description:
+//   Framework principal de estrategias de trading.
+//   Contiene logica compartida (riesgo, visual, backtesting)
+//   y modulos de estrategia activables individualmente.
+//
+//   Modulos disponibles:
+//     [1] AAC Scalping - Supply & Demand (zones)
+//
+//   Para agregar una nueva estrategia, seguir el patron del
+//   bloque "MODULE" e integrar sus senales en SIGNAL AGGREGATION.
+// ================================================================
+strategy(
+    title             = "AAC Main Trading Strategy",
+    shorttitle        = "AAC-MAIN",
+    overlay           = true,
+    initial_capital   = 10000,
+    default_qty_type  = strategy.percent_of_equity,
+    default_qty_value = 1,
+    commission_type   = strategy.commission.percent,
+    commission_value  = 0.05,
+    slippage          = 2,
+    max_bars_back     = 500,
+    pyramiding        = 0
+)
+
+// ================================================================
+// === SHARED — Backtesting Window
+// ================================================================
+var g_bt       = "Backtesting"
+i_bt_from      = input.time(timestamp("2024-01-01"), "From Date", group=g_bt)
+i_bt_to        = input.time(timestamp("2099-12-31"), "To Date",   group=g_bt)
+in_bt_window   = time >= i_bt_from and time <= i_bt_to
+
+// ================================================================
+// === SHARED — Trend
+// ================================================================
+var g_trend    = "Trend"
+i_ma_type      = input.string("EMA", "MA Type",        options=["EMA","SMA","WMA"], group=g_trend)
+i_ma_fast      = input.int(20,       "Fast MA Length",  minval=2, group=g_trend)
+i_ma_slow      = input.int(50,       "Slow MA Length",  minval=2, group=g_trend)
+i_use_trend    = input.bool(true,    "Filter by Trend", group=g_trend)
+
+// ================================================================
+// === SHARED — Risk Management
+// ================================================================
+var g_risk     = "Risk"
+i_sl_mult      = input.float(1.5, "Stop Loss (ATR mult)",      minval=0.1, step=0.1, group=g_risk)
+i_rr           = input.float(2.0, "Risk / Reward Ratio",       minval=0.5, step=0.1, group=g_risk)
+i_use_trail    = input.bool(false,"Use Trailing Stop",                               group=g_risk)
+i_trail_mult   = input.float(1.0, "Trailing Distance (ATR mult)", minval=0.1, step=0.1, group=g_risk)
+
+// ================================================================
+// === SHARED — Session Filter
+// ================================================================
+var g_session  = "Session"
+i_filter_sess  = input.bool(false,                "Filter by Session", group=g_session)
+i_session      = input.session("0930-1600",       "Trading Session",   group=g_session)
+i_tz           = input.string("America/New_York", "Timezone",          group=g_session)
+
+// ================================================================
+// === SHARED — Visual
+// ================================================================
+var g_vis      = "Visual"
+i_show_mas     = input.bool(true, "Show Moving Averages",  group=g_vis)
+i_show_labels  = input.bool(true, "Show BUY/SELL Labels",  group=g_vis)
+i_show_rr      = input.bool(true, "Show R/R Trade Boxes",  group=g_vis)
+i_transp_box   = input.int(75,    "Trade Box Transparency", minval=50, maxval=95, group=g_vis)
+
+// ================================================================
+// === SHARED — Debug
+// ================================================================
+var g_dbg      = "Debug"
+i_debug        = input.bool(false, "Show Debug Labels", group=g_dbg)
+
+// ================================================================
+// === SHARED — Calculations
+// ================================================================
+
+atr14 = ta.atr(14)
+
+_ma(src, len, t) =>
+    switch t
+        "EMA" => ta.ema(src, len)
+        "SMA" => ta.sma(src, len)
+        "WMA" => ta.wma(src, len)
+        =>       ta.ema(src, len)
+
+fast_ma   = _ma(close, i_ma_fast, i_ma_type)
+slow_ma   = _ma(close, i_ma_slow, i_ma_type)
+bull_bias = fast_ma > slow_ma
+bear_bias = fast_ma < slow_ma
+
+in_session = i_filter_sess ? not na(time(timeframe.period, i_session, i_tz)) : true
+
+trend_ok_long  = not i_use_trend or bull_bias
+trend_ok_short = not i_use_trend or bear_bias
+no_position    = strategy.position_size == 0
+
+sl_dist = atr14 * i_sl_mult
+tp_dist = sl_dist * i_rr
+
+// ================================================================
+// ================================================================
+// === MODULE 1: AAC Scalping - Supply & Demand
+// ================================================================
+// ================================================================
+
+var g_s1       = "AAC Scalping - Supply & Demand"
+i_s1_enable    = input.bool(true, "--- Enable AAC Scalping ---", group=g_s1)
+
+// --- Inputs
+i_s1_pivot_l   = input.int(5,    "Pivot Left Bars",             minval=1,   group=g_s1)
+i_s1_pivot_r   = input.int(5,    "Pivot Right Bars",            minval=1,   group=g_s1)
+i_s1_zone_atr  = input.float(0.5,"Zone Width (ATR mult)",       minval=0.1, step=0.05, group=g_s1)
+i_s1_extend    = input.int(100,  "Zone Extension (bars right)", minval=10,  group=g_s1)
+i_s1_max_zones = input.int(3,    "Max Active Zones per Side",   minval=1, maxval=5, group=g_s1)
+i_s1_inval     = input.bool(true,"Invalidate on Body Close-Through", group=g_s1)
+i_s1_touch     = input.string("Wick Touch", "Entry Trigger",
+    options=["Wick Touch","Body Close Inside"], group=g_s1)
+i_s1_longs     = input.bool(true, "Enable Longs",  group=g_s1)
+i_s1_shorts    = input.bool(true, "Enable Shorts", group=g_s1)
+i_s1_transp_z  = input.int(82,   "Zone Transparency", minval=50, maxval=95, group=g_s1)
+
+// --- Zone Arrays
+var float[] s1_sz_top   = array.new_float()
+var float[] s1_sz_bot   = array.new_float()
+var int[]   s1_sz_bar   = array.new_int()
+var bool[]  s1_sz_alive = array.new_bool()
+
+var float[] s1_dz_top   = array.new_float()
+var float[] s1_dz_bot   = array.new_float()
+var int[]   s1_dz_bar   = array.new_int()
+var bool[]  s1_dz_alive = array.new_bool()
+
+// --- Pivot Detection
+s1_ph = ta.pivothigh(high, i_s1_pivot_l, i_s1_pivot_r)
+s1_pl = ta.pivotlow(low,   i_s1_pivot_l, i_s1_pivot_r)
+
+s1_zone_half = atr14 * i_s1_zone_atr * 0.5
+
+// --- Register zones on new pivot
+if i_s1_enable and not na(s1_ph)
+    array.push(s1_sz_top,   s1_ph + s1_zone_half)
+    array.push(s1_sz_bot,   s1_ph - s1_zone_half)
+    array.push(s1_sz_bar,   bar_index - i_s1_pivot_r)
+    array.push(s1_sz_alive, true)
+    if array.size(s1_sz_top) > i_s1_max_zones
+        array.shift(s1_sz_top)
+        array.shift(s1_sz_bot)
+        array.shift(s1_sz_bar)
+        array.shift(s1_sz_alive)
+
+if i_s1_enable and not na(s1_pl)
+    array.push(s1_dz_top,   s1_pl + s1_zone_half)
+    array.push(s1_dz_bot,   s1_pl - s1_zone_half)
+    array.push(s1_dz_bar,   bar_index - i_s1_pivot_r)
+    array.push(s1_dz_alive, true)
+    if array.size(s1_dz_top) > i_s1_max_zones
+        array.shift(s1_dz_top)
+        array.shift(s1_dz_bot)
+        array.shift(s1_dz_bar)
+        array.shift(s1_dz_alive)
+
+// --- Invalidate on body close-through
+if i_s1_enable and i_s1_inval
+    for i = 0 to array.size(s1_sz_alive) - 1
+        if array.get(s1_sz_alive, i) and close > array.get(s1_sz_top, i)
+            array.set(s1_sz_alive, i, false)
+    for i = 0 to array.size(s1_dz_alive) - 1
+        if array.get(s1_dz_alive, i) and close < array.get(s1_dz_bot, i)
+            array.set(s1_dz_alive, i, false)
+
+// --- Entry signals
+s1_in_supply = false
+s1_in_demand = false
+
+if i_s1_enable
+    for i = 0 to array.size(s1_sz_alive) - 1
+        if array.get(s1_sz_alive, i)
+            zt = array.get(s1_sz_top, i)
+            zb = array.get(s1_sz_bot, i)
+            s1_in_supply := s1_in_supply or (
+                i_s1_touch == "Wick Touch"
+                    ? (high >= zb and low <= zt)
+                    : (close >= zb and close <= zt))
+
+    for i = 0 to array.size(s1_dz_alive) - 1
+        if array.get(s1_dz_alive, i)
+            zt = array.get(s1_dz_top, i)
+            zb = array.get(s1_dz_bot, i)
+            s1_in_demand := s1_in_demand or (
+                i_s1_touch == "Wick Touch"
+                    ? (high >= zb and low <= zt)
+                    : (close >= zb and close <= zt))
+
+s1_sig_long  = i_s1_enable and i_s1_longs  and s1_in_demand
+s1_sig_short = i_s1_enable and i_s1_shorts and s1_in_supply
+
+// --- Zone Visualization (module-specific, uses shared transparency)
+var box[] s1_s_boxes = array.new_box()
+var box[] s1_d_boxes = array.new_box()
+
+if i_s1_enable and barstate.islast
+    for b in s1_s_boxes
+        box.delete(b)
+    array.clear(s1_s_boxes)
+    for b in s1_d_boxes
+        box.delete(b)
+    array.clear(s1_d_boxes)
+
+    for i = 0 to array.size(s1_sz_alive) - 1
+        if array.get(s1_sz_alive, i)
+            b = box.new(
+                left         = array.get(s1_sz_bar, i),
+                top          = array.get(s1_sz_top, i),
+                right        = bar_index + i_s1_extend,
+                bottom       = array.get(s1_sz_bot, i),
+                bgcolor      = color.new(color.red,   i_s1_transp_z),
+                border_color = color.new(color.red,   50),
+                border_width = 1)
+            array.push(s1_s_boxes, b)
+
+    for i = 0 to array.size(s1_dz_alive) - 1
+        if array.get(s1_dz_alive, i)
+            b = box.new(
+                left         = array.get(s1_dz_bar, i),
+                top          = array.get(s1_dz_top, i),
+                right        = bar_index + i_s1_extend,
+                bottom       = array.get(s1_dz_bot, i),
+                bgcolor      = color.new(color.green, i_s1_transp_z),
+                border_color = color.new(color.green, 50),
+                border_width = 1)
+            array.push(s1_d_boxes, b)
+
+// ================================================================
+// ================================================================
+// === [ADD MODULE 2 HERE]
+// ================================================================
+// ================================================================
+// Pattern:
+//   var g_s2     = "Strategy Name"
+//   i_s2_enable  = input.bool(false, "--- Enable Strategy 2 ---", group=g_s2)
+//   ... inputs, calculations, signals ...
+//   s2_sig_long  = i_s2_enable and <your logic>
+//   s2_sig_short = i_s2_enable and <your logic>
+
+// ================================================================
+// === SIGNAL AGGREGATION
+// ================================================================
+// Each module contributes its signals here.
+// Add new modules following the same OR pattern.
+
+final_sig_long  = in_bt_window and no_position and in_session and trend_ok_long  and (
+    s1_sig_long
+    // or s2_sig_long
+)
+
+final_sig_short = in_bt_window and no_position and in_session and trend_ok_short and (
+    s1_sig_short
+    // or s2_sig_short
+)
+
+// ================================================================
+// === SHARED — Trade Execution
+// ================================================================
+
+long_sl  = close - sl_dist
+long_tp  = close + tp_dist
+short_sl = close + sl_dist
+short_tp = close - tp_dist
+
+if final_sig_long
+    strategy.entry("Long", strategy.long, comment="BUY NOW")
+
+if final_sig_short
+    strategy.entry("Short", strategy.short, comment="SELL NOW")
+
+if strategy.position_size > 0
+    if i_use_trail
+        strategy.exit("Long Exit", "Long",
+            trail_points = math.round(atr14 * i_trail_mult / syminfo.mintick),
+            trail_offset = math.round(atr14 * i_trail_mult / syminfo.mintick))
+    else
+        strategy.exit("Long Exit", "Long", limit=long_tp, stop=long_sl)
+
+if strategy.position_size < 0
+    if i_use_trail
+        strategy.exit("Short Exit", "Short",
+            trail_points = math.round(atr14 * i_trail_mult / syminfo.mintick),
+            trail_offset = math.round(atr14 * i_trail_mult / syminfo.mintick))
+    else
+        strategy.exit("Short Exit", "Short", limit=short_tp, stop=short_sl)
+
+// ================================================================
+// === SHARED — Visual Engine
+// ================================================================
+
+// Moving averages
+plot(i_show_mas ? fast_ma : na, "Fast MA",
+    color=color.new(color.aqua,   20), linewidth=1)
+plot(i_show_mas ? slow_ma : na, "Slow MA",
+    color=color.new(color.orange, 20), linewidth=2)
+
+// BUY / SELL labels
+if i_show_labels
+    if final_sig_long
+        label.new(
+            x         = bar_index,
+            y         = low - atr14 * 0.8,
+            text      = "BUY NOW",
+            style     = label.style_label_up,
+            color     = color.new(color.green, 5),
+            textcolor = color.white,
+            size      = size.normal)
+    if final_sig_short
+        label.new(
+            x         = bar_index,
+            y         = high + atr14 * 0.8,
+            text      = "SELL NOW",
+            style     = label.style_label_down,
+            color     = color.new(color.red, 5),
+            textcolor = color.white,
+            size      = size.normal)
+
+// ----------------------------------------------------------------
+// R/R Trade Boxes
+// Spec: two-zone box (TP teal / SL red) + central result label
+// Ref : skills/08_estilo_visual_entradas_salidas.md
+// ----------------------------------------------------------------
+
+var float _e_price = na
+var float _e_sl    = na
+var float _e_tp    = na
+var int   _e_bar   = na
+var string _e_dir  = ""
+var box    _tp_box = na
+var box    _sl_box = na
+var label  _rr_lbl = na
+
+if final_sig_long and i_show_rr
+    _e_price := close
+    _e_sl    := long_sl
+    _e_tp    := long_tp
+    _e_bar   := bar_index
+    _e_dir   := "long"
+
+if final_sig_short and i_show_rr
+    _e_price := close
+    _e_sl    := short_sl
+    _e_tp    := short_tp
+    _e_bar   := bar_index
+    _e_dir   := "short"
+
+// Redraw boxes on every bar while in trade
+if i_show_rr and not na(_e_price) and strategy.position_size != 0
+    box.delete(_tp_box)
+    box.delete(_sl_box)
+    label.delete(_rr_lbl)
+
+    c_tp   = color.new(color.teal, i_transp_box)
+    c_sl   = color.new(color.red,  i_transp_box)
+    tp_pct = str.tostring(math.abs(_e_tp - _e_price) / _e_price * 100, "#.##") + "%"
+    sl_pct = str.tostring(math.abs(_e_price - _e_sl) / _e_price * 100, "#.##") + "%"
+
+    if _e_dir == "long"
+        _tp_box := box.new(_e_bar, _e_tp,    bar_index + 1, _e_price,
+            bgcolor=c_tp, border_color=color.new(color.teal, 30), border_width=1)
+        _sl_box := box.new(_e_bar, _e_price, bar_index + 1, _e_sl,
+            bgcolor=c_sl, border_color=color.new(color.red,  30), border_width=1)
+    else
+        _tp_box := box.new(_e_bar, _e_price, bar_index + 1, _e_tp,
+            bgcolor=c_tp, border_color=color.new(color.teal, 30), border_width=1)
+        _sl_box := box.new(_e_bar, _e_sl,    bar_index + 1, _e_price,
+            bgcolor=c_sl, border_color=color.new(color.red,  30), border_width=1)
+
+    _rr_lbl := label.new(
+        bar_index + 2, (_e_tp + _e_sl) / 2,
+        "Objetivo : " + str.tostring(_e_tp, format.mintick) + " (" + tp_pct + ")" +
+        "\nEntrada  : " + str.tostring(_e_price, format.mintick) +
+        "\nStop     : " + str.tostring(_e_sl, format.mintick) + " (" + sl_pct + ")" +
+        "\nR/R  1:" + str.tostring(i_rr, "#.#"),
+        style     = label.style_label_left,
+        color     = color.new(color.teal, 15),
+        textcolor = color.white,
+        size      = size.tiny)
+
+// Finalize with result label on trade close
+if i_show_rr and strategy.position_size == 0 and not na(_e_price)
+    n = strategy.closedtrades
+    if n > 0
+        pnl    = strategy.closedtrades.profit(n - 1)
+        qty    = math.abs(strategy.closedtrades.size(n - 1))
+        is_win = pnl > 0
+        label.delete(_rr_lbl)
+        _rr_lbl := label.new(
+            bar_index, (_e_tp + _e_sl) / 2,
+            "PyG Cerrado : " + (is_win ? "+" : "") + str.tostring(pnl, "#.##") +
+            "\nCantidad    : " + str.tostring(qty, "#.#####") +
+            "\nR/R  1:" + str.tostring(i_rr, "#.#"),
+            style     = label.style_label_left,
+            color     = is_win ? color.new(color.teal, 10) : color.new(color.red, 10),
+            textcolor = color.white,
+            size      = size.small)
+    _e_price := na
+
+// ================================================================
+// === SHARED — Debug Output
+// ================================================================
+
+if i_debug and barstate.islast
+    label.new(
+        bar_index, high + atr14 * 3,
+        "ATR="     + str.tostring(atr14, "#.####") +
+        " | Trend=" + (bull_bias ? "BULL" : "BEAR") +
+        " | Session=" + str.tostring(in_session) +
+        " | BT window=" + str.tostring(in_bt_window) +
+        "\n[S1] enabled=" + str.tostring(i_s1_enable) +
+        " | supply_zones=" + str.tostring(array.size(s1_sz_alive)) +
+        " | demand_zones=" + str.tostring(array.size(s1_dz_alive)) +
+        " | in_supply=" + str.tostring(s1_in_supply) +
+        " | in_demand=" + str.tostring(s1_in_demand),
+        style     = label.style_label_down,
+        color     = color.new(color.gray, 30),
+        textcolor = color.white,
+        size      = size.tiny)
