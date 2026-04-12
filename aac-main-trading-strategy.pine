@@ -30,8 +30,8 @@ strategy(title="AAC Main Trading Strategy",
 // === SHARED - Backtesting Window
 // ================================================================
 var g_bt     = "Backtesting"
-i_bt_from    = input.time(timestamp("2024-01-01"), "From Date", group=g_bt)
-i_bt_to      = input.time(timestamp("2099-12-31"), "To Date",   group=g_bt)
+i_bt_from    = input.time(timestamp("2022-01-01"), "From Date", group=g_bt)
+i_bt_to      = input.time(timestamp("2026-12-31"), "To Date",   group=g_bt)
 in_bt_window = time >= i_bt_from and time <= i_bt_to
 
 // ================================================================
@@ -306,6 +306,8 @@ var int    _e_bar   = na
 var string _e_dir   = ""
 var box    _tp_box  = na
 var box    _sl_box  = na
+var label  _tp_lbl  = na
+var label  _sl_lbl  = na
 var label  _rr_lbl  = na
 
 if final_sig_long and i_show_rr
@@ -322,46 +324,60 @@ if final_sig_short and i_show_rr
     _e_bar   := bar_index
     _e_dir   := "short"
 
-// Redraw boxes on every bar while in trade
+// Redraw boxes and labels on every bar while in trade
 if i_show_rr and not na(_e_price) and strategy.position_size != 0
     box.delete(_tp_box)
     box.delete(_sl_box)
+    label.delete(_tp_lbl)
+    label.delete(_sl_lbl)
     label.delete(_rr_lbl)
 
-    c_tp   = color.new(color.teal, i_transp_box)
-    c_sl   = color.new(color.red,  i_transp_box)
-    tp_pct = str.tostring(math.abs(_e_tp - _e_price) / _e_price * 100, "#.##") + "%"
-    sl_pct = str.tostring(math.abs(_e_price - _e_sl) / _e_price * 100, "#.##") + "%"
-    lbl_txt = "Objetivo : " + str.tostring(_e_tp, format.mintick) + " (" + tp_pct + ")" +
-         "\nEntrada  : " + str.tostring(_e_price, format.mintick) +
-         "\nStop     : " + str.tostring(_e_sl, format.mintick) + " (" + sl_pct + ")" +
-         "\nR/R  1:" + str.tostring(i_rr, "#.#")
+    qty      = math.abs(strategy.position_size)
+    tp_dist_ = math.abs(_e_tp - _e_price)
+    sl_dist_ = math.abs(_e_price - _e_sl)
+    tp_pct   = str.tostring(tp_dist_ / _e_price * 100, "#.###") + "%"
+    sl_pct   = str.tostring(sl_dist_ / _e_price * 100, "#.###") + "%"
+    tp_val   = str.tostring(tp_dist_ * qty, "#.##")
+    sl_val   = str.tostring(sl_dist_ * qty, "#.##")
+    open_pnl = _e_dir == "long" ? (close - _e_price) * qty : (_e_price - close) * qty
+    is_pos   = open_pnl >= 0
+
+    c_tp  = color.new(color.teal, i_transp_box)
+    c_sl  = color.new(color.red,  i_transp_box)
+    x_lbl = bar_index + 2
+
+    tp_lbl_txt = "Objetivo: " + str.tostring(_e_tp, format.mintick) + " (" + tp_pct + ") " + str.tostring(_e_tp, format.mintick) + ", Importe: " + tp_val
+    sl_lbl_txt = "Stop: "     + str.tostring(_e_sl, format.mintick) + " (" + sl_pct + ") " + str.tostring(_e_sl, format.mintick) + ", Importe: " + sl_val
+    ctr_txt    = "PyG Apertura: " + str.tostring(open_pnl, "#.##") + ", Cantidad: " + str.tostring(qty, "#.#####") + "\nratio riesgo/beneficio: " + str.tostring(i_rr, "#.#")
 
     if _e_dir == "long"
         _tp_box := box.new(_e_bar, _e_tp,    bar_index + 1, _e_price,
              bgcolor=c_tp, border_color=color.new(color.teal, 30), border_width=1)
         _sl_box := box.new(_e_bar, _e_price, bar_index + 1, _e_sl,
              bgcolor=c_sl, border_color=color.new(color.red,  30), border_width=1)
+        _tp_lbl := label.new(x_lbl, _e_tp,    tp_lbl_txt, style=label.style_label_lower_left, color=color.new(color.teal, 10), textcolor=color.white, size=size.small)
+        _sl_lbl := label.new(x_lbl, _e_sl,    sl_lbl_txt, style=label.style_label_upper_left, color=color.new(color.red,  10), textcolor=color.white, size=size.small)
     else
         _tp_box := box.new(_e_bar, _e_price, bar_index + 1, _e_tp,
              bgcolor=c_tp, border_color=color.new(color.teal, 30), border_width=1)
         _sl_box := box.new(_e_bar, _e_sl,    bar_index + 1, _e_price,
              bgcolor=c_sl, border_color=color.new(color.red,  30), border_width=1)
+        _tp_lbl := label.new(x_lbl, _e_tp,    tp_lbl_txt, style=label.style_label_upper_left, color=color.new(color.teal, 10), textcolor=color.white, size=size.small)
+        _sl_lbl := label.new(x_lbl, _e_sl,    sl_lbl_txt, style=label.style_label_lower_left, color=color.new(color.red,  10), textcolor=color.white, size=size.small)
 
-    _rr_lbl := label.new(bar_index + 2, (_e_tp + _e_sl) / 2, lbl_txt,
-         style=label.style_label_left, color=color.new(color.teal, 15),
-         textcolor=color.white, size=size.tiny)
+    _rr_lbl := label.new(x_lbl, (_e_tp + _e_sl) / 2, ctr_txt,
+         style=label.style_label_left,
+         color=is_pos ? color.new(color.teal, 15) : color.new(color.red, 15),
+         textcolor=color.white, size=size.small)
 
-// Finalize with result label on trade close
+// Finalize labels on trade close
 if i_show_rr and strategy.position_size == 0 and not na(_e_price)
     n = strategy.closedtrades
     if n > 0
         pnl    = strategy.closedtrades.profit(n - 1)
         qty    = math.abs(strategy.closedtrades.size(n - 1))
         is_win = pnl > 0
-        res_txt = "PyG Cerrado : " + (is_win ? "+" : "") + str.tostring(pnl, "#.##") +
-             "\nCantidad    : " + str.tostring(qty, "#.#####") +
-             "\nR/R  1:" + str.tostring(i_rr, "#.#")
+        res_txt = "PyG Cerrado: " + (is_win ? "+" : "") + str.tostring(pnl, "#.##") + ", Cantidad: " + str.tostring(qty, "#.#####") + "\nratio riesgo/beneficio: " + str.tostring(i_rr, "#.#")
         label.delete(_rr_lbl)
         _rr_lbl := label.new(bar_index, (_e_tp + _e_sl) / 2, res_txt,
              style=label.style_label_left,
