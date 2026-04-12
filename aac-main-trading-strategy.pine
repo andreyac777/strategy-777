@@ -430,13 +430,89 @@ if strategy.closedtrades > nz(strategy.closedtrades[1], 0)
         _sw  := _sw  + (_is_win ? 1 : 0)
         _slo := _slo + (_is_win ? 0 : 1)
 
-// --- Table object (persists across bars)
+// Colors (global scope - used across all three analyzer blocks below)
+C_HDR = color.new(color.gray,   50)
+C_BG  = color.new(color.black,  15)
+C_YEL = color.new(color.yellow, 20)
+C_WHT = color.white
+C_GRN = color.new(color.green,  10)
+C_ORG = color.new(color.orange, 10)
+C_RED = color.new(color.red,    10)
+C_FTR = color.new(color.gray,   75)
+
+// --- Table object: created once, never deleted
+// Old values freeze in place while a new bar is forming (no blanking/clearing)
 var table _atbl = na
 
-if i_show_table and barstate.islast
-    table.delete(_atbl)
+// --- BLOCK 1: Build static skeleton on first bar only
+// Sets labels and suggested values (TF-based, constant per chart load)
+if i_show_table and na(_atbl)
+    _tf0    = timeframe.period
+    r0_piv  = _tf0 == "1" ? 3 : _tf0 == "3" ? 3 : _tf0 == "5" ? 4 : _tf0 == "15" ? 5 : _tf0 == "30" ? 6 : _tf0 == "60" ? 7 : _tf0 == "240" ? 8 : 5
+    r0_zatr = _tf0 == "1" ? 0.3 : _tf0 == "3" ? 0.35 : _tf0 == "5" ? 0.4 : _tf0 == "15" ? 0.5 : _tf0 == "30" ? 0.6 : _tf0 == "60" ? 0.7 : _tf0 == "240" ? 0.8 : 0.5
+    r0_sl   = _tf0 == "1" ? 1.0 : _tf0 == "3" ? 1.0 : _tf0 == "5" ? 1.2 : _tf0 == "15" ? 1.5 : _tf0 == "30" ? 1.8 : _tf0 == "60" ? 2.0 : _tf0 == "240" ? 2.5 : 1.5
+    r0_rr   = _tf0 == "1" ? 1.5 : _tf0 == "3" ? 1.5 : _tf0 == "5" ? 1.8 : _tf0 == "15" ? 2.0 : _tf0 == "30" ? 2.0 : _tf0 == "60" ? 2.5 : _tf0 == "240" ? 2.5 : 2.0
+    r0_tch  = (_tf0 == "1" or _tf0 == "3" or _tf0 == "5") ? "Body" : "Wick"
 
-    // Performance metrics
+    _atbl := table.new(position.bottom_right, 3, 18, border_width=1,
+         border_color=color.new(color.gray, 60), frame_width=1,
+         frame_color=color.new(color.gray, 40))
+
+    // Row 0 - Header (col 2 = status cell, updated every tick by BLOCK 2)
+    table.cell(_atbl, 0, 0, "AAC STRATEGY ANALYZER", bgcolor=C_HDR, text_color=C_YEL, text_size=size.small, text_halign=text.align_left)
+    table.cell(_atbl, 1, 0, "CURRENT", bgcolor=C_HDR, text_color=C_YEL, text_size=size.small, text_halign=text.align_center)
+    table.cell(_atbl, 2, 0, "[ ~ ]", bgcolor=C_HDR, text_color=C_ORG, text_size=size.small, text_halign=text.align_center)
+
+    // Row 1 - Performance section header
+    table.cell(_atbl, 0, 1, "PERFORMANCE  |  TF: " + _tf0, bgcolor=C_HDR, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_atbl, 1, 1, "", bgcolor=C_HDR, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_center)
+    table.cell(_atbl, 2, 1, "", bgcolor=C_HDR, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_center)
+
+    // Rows 2-8: label column only (data cols filled by BLOCK 3 on bar close)
+    table.cell(_atbl, 0, 2, "Total Trades",  bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_atbl, 0, 3, "Win Rate",       bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_atbl, 0, 4, "Profit Factor",  bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_atbl, 0, 5, "Net Profit",     bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_atbl, 0, 6, "Max Drawdown",   bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_atbl, 0, 7, "Long Win Rate",  bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_atbl, 0, 8, "Short Win Rate", bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_left)
+
+    // Row 9 - Recommendations section header
+    table.cell(_atbl, 0, 9, "RECOMMENDATIONS  |  TF: " + _tf0, bgcolor=C_HDR, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_atbl, 1, 9, "CURRENT", bgcolor=C_HDR, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_center)
+    table.cell(_atbl, 2, 9, "SUGGESTED", bgcolor=C_HDR, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_center)
+
+    // Rows 10-15: label + suggested columns (static); current col filled by BLOCK 3
+    table.cell(_atbl, 0, 10, "Pivot Bars L/R", bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_atbl, 2, 10, str.tostring(r0_piv) + "/" + str.tostring(r0_piv), bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_center)
+    table.cell(_atbl, 0, 11, "Zone Width ATR", bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_atbl, 2, 11, str.tostring(r0_zatr, "#.##"), bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_center)
+    table.cell(_atbl, 0, 12, "SL Mult ATR",    bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_atbl, 2, 12, str.tostring(r0_sl, "#.#"), bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_center)
+    table.cell(_atbl, 0, 13, "R/R Ratio",      bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_atbl, 2, 13, str.tostring(r0_rr, "#.#"), bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_center)
+    table.cell(_atbl, 0, 14, "Entry Trigger",  bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_atbl, 2, 14, r0_tch, bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_center)
+    table.cell(_atbl, 0, 15, "Trend Filter",   bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_atbl, 2, 15, "ON", bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_center)
+    table.cell(_atbl, 0, 16, "Config Score",   bgcolor=C_BG, text_color=C_WHT, text_size=size.small, text_halign=text.align_left)
+
+    // Row 17 - Footer
+    table.cell(_atbl, 0, 17, "Green=matches  Orange=adjust in Inputs", bgcolor=C_FTR, text_color=color.new(color.gray, 20), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_atbl, 1, 17, "", bgcolor=C_FTR, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_center)
+    table.cell(_atbl, 2, 17, "", bgcolor=C_FTR, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_center)
+
+// --- BLOCK 2: Status indicator - updates on every tick (only the [ ~ ] cell)
+// Shows [ ~ ] while bar is forming, [ OK ] the instant the bar closes
+if i_show_table and barstate.islast and not na(_atbl)
+    _live = not barstate.isconfirmed
+    table.cell(_atbl, 2, 0, _live ? "[ ~ ]" : "[ OK ]",
+         bgcolor=C_HDR, text_color=_live ? C_ORG : C_GRN,
+         text_size=size.small, text_halign=text.align_center)
+
+// --- BLOCK 3: Data cells - update only on confirmed bar close
+// While new bar is forming these cells are frozen (no blank flash, values usable as history)
+if i_show_table and barstate.isconfirmed and not na(_atbl)
     _total  = strategy.closedtrades
     _wr     = _total > 0 ? strategy.wintrades / _total * 100 : 0.0
     _pf     = strategy.grossloss != 0 ? strategy.grossprofit / math.abs(strategy.grossloss) : 0.0
@@ -447,7 +523,6 @@ if i_show_table and barstate.islast
     _lwr    = _lt > 0 ? _lw / _lt * 100 : 0.0
     _swr    = _st > 0 ? _sw / _st * 100 : 0.0
 
-    // Timeframe-based recommendations
     _tf     = timeframe.period
     r_piv   = _tf == "1" ? 3 : _tf == "3" ? 3 : _tf == "5" ? 4 : _tf == "15" ? 5 : _tf == "30" ? 6 : _tf == "60" ? 7 : _tf == "240" ? 8 : 5
     r_zatr  = _tf == "1" ? 0.3 : _tf == "3" ? 0.35 : _tf == "5" ? 0.4 : _tf == "15" ? 0.5 : _tf == "30" ? 0.6 : _tf == "60" ? 0.7 : _tf == "240" ? 0.8 : 0.5
@@ -455,7 +530,6 @@ if i_show_table and barstate.islast
     r_rr    = _tf == "1" ? 1.5 : _tf == "3" ? 1.5 : _tf == "5" ? 1.8 : _tf == "15" ? 2.0 : _tf == "30" ? 2.0 : _tf == "60" ? 2.5 : _tf == "240" ? 2.5 : 2.0
     r_tch   = (_tf == "1" or _tf == "3" or _tf == "5") ? "Body Close Inside" : "Wick Touch"
 
-    // Match checks (green = current matches recommendation)
     m_piv   = i_s1_pivot_l == r_piv and i_s1_pivot_r == r_piv
     m_zatr  = math.abs(i_s1_zone_atr - r_zatr) < 0.05
     m_sl    = math.abs(i_sl_mult - r_sl) < 0.1
@@ -464,110 +538,33 @@ if i_show_table and barstate.islast
     m_tr    = i_use_trend
     _score  = (m_piv ? 1 : 0) + (m_zatr ? 1 : 0) + (m_sl ? 1 : 0) + (m_rr ? 1 : 0) + (m_tch ? 1 : 0) + (m_tr ? 1 : 0)
 
-    // Colors
-    C_HDR = color.new(color.gray,  50)
-    C_BG  = color.new(color.black, 15)
-    C_YEL = color.new(color.yellow, 20)
-    C_WHT = color.white
-    C_GRN = color.new(color.green,  10)
-    C_ORG = color.new(color.orange, 10)
-    C_RED = color.new(color.red,    10)
-    C_FTR = color.new(color.gray,   75)
-
-    _atbl := table.new(position.bottom_right, 3, 18, border_width=1,
-         border_color=color.new(color.gray, 60), frame_width=1,
-         frame_color=color.new(color.gray, 40))
-
-    // Row 0 - Main header
-    table.cell(_atbl, 0, 0, "AAC STRATEGY ANALYZER", bgcolor=C_HDR, text_color=C_YEL, text_size=size.small, text_halign=text.align_left)
-    table.cell(_atbl, 1, 0, "CURRENT", bgcolor=C_HDR, text_color=C_YEL, text_size=size.small, text_halign=text.align_center)
-    table.cell(_atbl, 2, 0, "STATUS / TARGET", bgcolor=C_HDR, text_color=C_YEL, text_size=size.small, text_halign=text.align_center)
-
-    // Row 1 - Performance header
-    table.cell(_atbl, 0, 1, "PERFORMANCE  |  TF: " + _tf, bgcolor=C_HDR, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(_atbl, 1, 1, "", bgcolor=C_HDR, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_center)
-    table.cell(_atbl, 2, 1, "", bgcolor=C_HDR, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_center)
-
-    // Row 2 - Total Trades
-    table.cell(_atbl, 0, 2, "Total Trades", bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_left)
+    // Performance data cols
     table.cell(_atbl, 1, 2, str.tostring(_total), bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_center)
     table.cell(_atbl, 2, 2, _total >= 30 ? "OK" : "FEW TRADES", bgcolor=C_BG, text_color=_total >= 30 ? C_GRN : C_ORG, text_size=size.tiny, text_halign=text.align_center)
-
-    // Row 3 - Win Rate
-    table.cell(_atbl, 0, 3, "Win Rate", bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_left)
     table.cell(_atbl, 1, 3, str.tostring(_wr, "#.1") + "%", bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_center)
     table.cell(_atbl, 2, 3, _wr >= 55 ? "GOOD >55%" : _wr >= 50 ? "OK >50%" : "LOW <50%", bgcolor=C_BG, text_color=_wr >= 55 ? C_GRN : _wr >= 50 ? C_ORG : C_RED, text_size=size.tiny, text_halign=text.align_center)
-
-    // Row 4 - Profit Factor
-    table.cell(_atbl, 0, 4, "Profit Factor", bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_left)
     table.cell(_atbl, 1, 4, str.tostring(_pf, "#.##"), bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_center)
     table.cell(_atbl, 2, 4, _pf >= 1.5 ? "GOOD >1.5" : _pf >= 1.0 ? "OK >1.0" : "LOSS <1.0", bgcolor=C_BG, text_color=_pf >= 1.5 ? C_GRN : _pf >= 1.0 ? C_ORG : C_RED, text_size=size.tiny, text_halign=text.align_center)
-
-    // Row 5 - Net Profit
-    table.cell(_atbl, 0, 5, "Net Profit", bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_left)
     table.cell(_atbl, 1, 5, (_netp >= 0 ? "+" : "") + str.tostring(_netp, "#.00"), bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_center)
     table.cell(_atbl, 2, 5, _netp > 0 ? "PROFIT" : "LOSS", bgcolor=C_BG, text_color=_netp > 0 ? C_GRN : C_RED, text_size=size.tiny, text_halign=text.align_center)
-
-    // Row 6 - Max Drawdown
-    table.cell(_atbl, 0, 6, "Max Drawdown", bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_left)
     table.cell(_atbl, 1, 6, str.tostring(_dd_pct, "#.1") + "%", bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_center)
     table.cell(_atbl, 2, 6, _dd_pct <= 10 ? "OK <10%" : _dd_pct <= 20 ? "WATCH <20%" : "HIGH >20%", bgcolor=C_BG, text_color=_dd_pct <= 10 ? C_GRN : _dd_pct <= 20 ? C_ORG : C_RED, text_size=size.tiny, text_halign=text.align_center)
-
-    // Row 7 - Long Win Rate
-    table.cell(_atbl, 0, 7, "Long Win Rate", bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_left)
     table.cell(_atbl, 1, 7, str.tostring(_lwr, "#.1") + "% (" + str.tostring(_lt) + ")", bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_center)
     table.cell(_atbl, 2, 7, _lwr >= 55 ? "GOOD" : _lwr >= 50 ? "OK" : "LOW", bgcolor=C_BG, text_color=_lwr >= 55 ? C_GRN : _lwr >= 50 ? C_ORG : C_RED, text_size=size.tiny, text_halign=text.align_center)
-
-    // Row 8 - Short Win Rate
-    table.cell(_atbl, 0, 8, "Short Win Rate", bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_left)
     table.cell(_atbl, 1, 8, str.tostring(_swr, "#.1") + "% (" + str.tostring(_st) + ")", bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_center)
     table.cell(_atbl, 2, 8, _swr >= 55 ? "GOOD" : _swr >= 50 ? "OK" : "LOW", bgcolor=C_BG, text_color=_swr >= 55 ? C_GRN : _swr >= 50 ? C_ORG : C_RED, text_size=size.tiny, text_halign=text.align_center)
 
-    // Row 9 - Recommendations header
-    table.cell(_atbl, 0, 9, "RECOMMENDATIONS  |  TF: " + _tf, bgcolor=C_HDR, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(_atbl, 1, 9, "CURRENT", bgcolor=C_HDR, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_center)
-    table.cell(_atbl, 2, 9, "SUGGESTED", bgcolor=C_HDR, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_center)
-
-    // Row 10 - Pivot Bars
-    table.cell(_atbl, 0, 10, "Pivot Bars L/R", bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(_atbl, 1, 10, str.tostring(i_s1_pivot_l) + "/" + str.tostring(i_s1_pivot_r), bgcolor=C_BG, text_color=m_piv ? C_GRN : C_ORG, text_size=size.tiny, text_halign=text.align_center)
-    table.cell(_atbl, 2, 10, str.tostring(r_piv) + "/" + str.tostring(r_piv), bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_center)
-
-    // Row 11 - Zone Width ATR
-    table.cell(_atbl, 0, 11, "Zone Width ATR", bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(_atbl, 1, 11, str.tostring(i_s1_zone_atr, "#.##"), bgcolor=C_BG, text_color=m_zatr ? C_GRN : C_ORG, text_size=size.tiny, text_halign=text.align_center)
-    table.cell(_atbl, 2, 11, str.tostring(r_zatr, "#.##"), bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_center)
-
-    // Row 12 - SL Mult ATR
-    table.cell(_atbl, 0, 12, "SL Mult ATR", bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(_atbl, 1, 12, str.tostring(i_sl_mult, "#.#"), bgcolor=C_BG, text_color=m_sl ? C_GRN : C_ORG, text_size=size.tiny, text_halign=text.align_center)
-    table.cell(_atbl, 2, 12, str.tostring(r_sl, "#.#"), bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_center)
-
-    // Row 13 - R/R Ratio
-    table.cell(_atbl, 0, 13, "R/R Ratio", bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_left)
-    table.cell(_atbl, 1, 13, str.tostring(i_rr, "#.#"), bgcolor=C_BG, text_color=m_rr ? C_GRN : C_ORG, text_size=size.tiny, text_halign=text.align_center)
-    table.cell(_atbl, 2, 13, str.tostring(r_rr, "#.#"), bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_center)
-
-    // Row 14 - Entry Trigger
+    // Recommendations current cols
     _cur_tch = i_s1_touch == "Wick Touch" ? "Wick" : "Body"
-    _rec_tch = r_tch == "Wick Touch" ? "Wick" : "Body"
-    table.cell(_atbl, 0, 14, "Entry Trigger", bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_atbl, 1, 10, str.tostring(i_s1_pivot_l) + "/" + str.tostring(i_s1_pivot_r), bgcolor=C_BG, text_color=m_piv ? C_GRN : C_ORG, text_size=size.tiny, text_halign=text.align_center)
+    table.cell(_atbl, 1, 11, str.tostring(i_s1_zone_atr, "#.##"), bgcolor=C_BG, text_color=m_zatr ? C_GRN : C_ORG, text_size=size.tiny, text_halign=text.align_center)
+    table.cell(_atbl, 1, 12, str.tostring(i_sl_mult, "#.#"), bgcolor=C_BG, text_color=m_sl ? C_GRN : C_ORG, text_size=size.tiny, text_halign=text.align_center)
+    table.cell(_atbl, 1, 13, str.tostring(i_rr, "#.#"), bgcolor=C_BG, text_color=m_rr ? C_GRN : C_ORG, text_size=size.tiny, text_halign=text.align_center)
     table.cell(_atbl, 1, 14, _cur_tch, bgcolor=C_BG, text_color=m_tch ? C_GRN : C_ORG, text_size=size.tiny, text_halign=text.align_center)
-    table.cell(_atbl, 2, 14, _rec_tch, bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_center)
-
-    // Row 15 - Trend Filter
-    table.cell(_atbl, 0, 15, "Trend Filter", bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_left)
     table.cell(_atbl, 1, 15, i_use_trend ? "ON" : "OFF", bgcolor=C_BG, text_color=m_tr ? C_GRN : C_ORG, text_size=size.tiny, text_halign=text.align_center)
-    table.cell(_atbl, 2, 15, "ON", bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_center)
 
-    // Row 16 - Config Score
+    // Config score
     _s_col = _score >= 5 ? C_GRN : _score >= 3 ? C_ORG : C_RED
     _s_lbl = _score >= 5 ? "OPTIMAL" : _score >= 3 ? "ADJUST" : "REVIEW"
-    table.cell(_atbl, 0, 16, "Config Score", bgcolor=C_BG, text_color=C_WHT, text_size=size.small, text_halign=text.align_left)
     table.cell(_atbl, 1, 16, str.tostring(_score) + " / 6", bgcolor=C_BG, text_color=_s_col, text_size=size.small, text_halign=text.align_center)
     table.cell(_atbl, 2, 16, _s_lbl, bgcolor=C_BG, text_color=_s_col, text_size=size.small, text_halign=text.align_center)
-
-    // Row 17 - Footer
-    table.cell(_atbl, 0, 17, "Green=matches  Orange=adjust in Inputs", bgcolor=C_FTR, text_color=color.new(color.gray, 20), text_size=size.tiny, text_halign=text.align_left)
-    table.cell(_atbl, 1, 17, "", bgcolor=C_FTR, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_center)
-    table.cell(_atbl, 2, 17, "", bgcolor=C_FTR, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_center)
