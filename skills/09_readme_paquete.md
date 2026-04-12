@@ -12,6 +12,7 @@ Este paquete contiene la base documental del proyecto para desarrollar una estra
 - `06_acceptance_criteria.md`
 - `07_claude_master_prompt.md`
 - `08_estilo_visual_entradas_salidas.md`
+- `10_pinescript_syntax_rules.md` — Reglas obligatorias de sintaxis y encoding para evitar errores de parsing
 
 ## Uso recomendado
 Cargar todos los archivos como contexto del proyecto y luego dar una instrucción como:

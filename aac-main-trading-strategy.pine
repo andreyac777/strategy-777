@@ -14,22 +14,20 @@
 //   Para agregar una nueva estrategia, seguir el patron del
 //   bloque "MODULE" e integrar sus senales en SIGNAL AGGREGATION.
 // ================================================================
-strategy(
-    title             = "AAC Main Trading Strategy",
-    shorttitle        = "AAC-MAIN",
-    overlay           = true,
-    initial_capital   = 10000,
-    default_qty_type  = strategy.percent_of_equity,
-    default_qty_value = 1,
-    commission_type   = strategy.commission.percent,
-    commission_value  = 0.05,
-    slippage          = 2,
-    max_bars_back     = 500,
-    pyramiding        = 0
-)
+strategy(title="AAC Main Trading Strategy",
+     shorttitle="AAC-MAIN",
+     overlay=true,
+     initial_capital=10000,
+     default_qty_type=strategy.percent_of_equity,
+     default_qty_value=1,
+     commission_type=strategy.commission.percent,
+     commission_value=0.05,
+     slippage=2,
+     max_bars_back=500,
+     pyramiding=0)
 
 // ================================================================
-// === SHARED — Backtesting Window
+// === SHARED - Backtesting Window
 // ================================================================
 var g_bt       = "Backtesting"
 i_bt_from      = input.time(timestamp("2024-01-01"), "From Date", group=g_bt)
@@ -37,7 +35,7 @@ i_bt_to        = input.time(timestamp("2099-12-31"), "To Date",   group=g_bt)
 in_bt_window   = time >= i_bt_from and time <= i_bt_to
 
 // ================================================================
-// === SHARED — Trend
+// === SHARED - Trend
 // ================================================================
 var g_trend    = "Trend"
 i_ma_type      = input.string("EMA", "MA Type",        options=["EMA","SMA","WMA"], group=g_trend)
@@ -46,7 +44,7 @@ i_ma_slow      = input.int(50,       "Slow MA Length",  minval=2, group=g_trend)
 i_use_trend    = input.bool(true,    "Filter by Trend", group=g_trend)
 
 // ================================================================
-// === SHARED — Risk Management
+// === SHARED - Risk Management
 // ================================================================
 var g_risk     = "Risk"
 i_sl_mult      = input.float(1.5, "Stop Loss (ATR mult)",      minval=0.1, step=0.1, group=g_risk)
@@ -55,7 +53,7 @@ i_use_trail    = input.bool(false,"Use Trailing Stop",                          
 i_trail_mult   = input.float(1.0, "Trailing Distance (ATR mult)", minval=0.1, step=0.1, group=g_risk)
 
 // ================================================================
-// === SHARED — Session Filter
+// === SHARED - Session Filter
 // ================================================================
 var g_session  = "Session"
 i_filter_sess  = input.bool(false,                "Filter by Session", group=g_session)
@@ -63,7 +61,7 @@ i_session      = input.session("0930-1600",       "Trading Session",   group=g_s
 i_tz           = input.string("America/New_York", "Timezone",          group=g_session)
 
 // ================================================================
-// === SHARED — Visual
+// === SHARED - Visual
 // ================================================================
 var g_vis      = "Visual"
 i_show_mas     = input.bool(true, "Show Moving Averages",  group=g_vis)
@@ -72,13 +70,13 @@ i_show_rr      = input.bool(true, "Show R/R Trade Boxes",  group=g_vis)
 i_transp_box   = input.int(75,    "Trade Box Transparency", minval=50, maxval=95, group=g_vis)
 
 // ================================================================
-// === SHARED — Debug
+// === SHARED - Debug
 // ================================================================
 var g_dbg      = "Debug"
 i_debug        = input.bool(false, "Show Debug Labels", group=g_dbg)
 
 // ================================================================
-// === SHARED — Calculations
+// === SHARED - Calculations
 // ================================================================
 
 atr14 = ta.atr(14)
@@ -255,18 +253,12 @@ if i_s1_enable and barstate.islast
 // Each module contributes its signals here.
 // Add new modules following the same OR pattern.
 
-final_sig_long  = in_bt_window and no_position and in_session and trend_ok_long  and (
-    s1_sig_long
-    // or s2_sig_long
-)
-
-final_sig_short = in_bt_window and no_position and in_session and trend_ok_short and (
-    s1_sig_short
-    // or s2_sig_short
-)
+// To add module 2: append "or s2_sig_long" / "or s2_sig_short" at the end of each line
+final_sig_long  = in_bt_window and no_position and in_session and trend_ok_long  and s1_sig_long
+final_sig_short = in_bt_window and no_position and in_session and trend_ok_short and s1_sig_short
 
 // ================================================================
-// === SHARED — Trade Execution
+// === SHARED - Trade Execution
 // ================================================================
 
 long_sl  = close - sl_dist
@@ -297,7 +289,7 @@ if strategy.position_size < 0
         strategy.exit("Short Exit", "Short", limit=short_tp, stop=short_sl)
 
 // ================================================================
-// === SHARED — Visual Engine
+// === SHARED - Visual Engine
 // ================================================================
 
 // Moving averages
@@ -409,7 +401,7 @@ if i_show_rr and strategy.position_size == 0 and not na(_e_price)
     _e_price := na
 
 // ================================================================
-// === SHARED — Debug Output
+// === SHARED - Debug Output
 // ================================================================
 
 if i_debug and barstate.islast

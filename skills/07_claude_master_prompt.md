@@ -25,6 +25,7 @@ Construir una estrategia que:
 3. Código modular.
 4. Compatible con backtesting.
 5. Preparado para crecimiento.
+6. Aplicar SIEMPRE las reglas de sintaxis y encoding de `10_pinescript_syntax_rules.md` antes de entregar cualquier archivo .pine.
 
 ## Estructura del Código
 Separar en:
