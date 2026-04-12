@@ -49,6 +49,7 @@ i_use_trend  = input.bool(true, "Filter by Trend", group=g_trend)
 var g_risk   = "Risk"
 i_sl_mult    = input.float(1.5, "Stop Loss (ATR mult)", minval=0.1, step=0.1, group=g_risk)
 i_rr         = input.float(2.0, "Risk / Reward Ratio", minval=0.5, step=0.1, group=g_risk)
+i_risk_pct   = input.float(1.0, "Risk % per Trade (of equity)", minval=0.1, maxval=10.0, step=0.1, group=g_risk)
 i_use_trail  = input.bool(false, "Use Trailing Stop", group=g_risk)
 i_trail_mult = input.float(1.0, "Trailing Distance (ATR mult)", minval=0.1, step=0.1, group=g_risk)
 
@@ -258,11 +259,16 @@ long_tp  = close + tp_dist
 short_sl = close + sl_dist
 short_tp = close - tp_dist
 
+// Risk-based position size: lose exactly (equity * risk_pct%) if SL hits
+_risk_usd = strategy.equity * i_risk_pct / 100
+_pv       = syminfo.pointvalue > 0 ? syminfo.pointvalue : 1.0
+_qty      = math.max(_risk_usd / (sl_dist * _pv), syminfo.mintick)
+
 if final_sig_long
-    strategy.entry("Long", strategy.long, comment="BUY NOW")
+    strategy.entry("Long", strategy.long, qty=_qty, comment="BUY NOW")
 
 if final_sig_short
-    strategy.entry("Short", strategy.short, comment="SELL NOW")
+    strategy.entry("Short", strategy.short, qty=_qty, comment="SELL NOW")
 
 if strategy.position_size > 0
     if i_use_trail
@@ -497,10 +503,10 @@ if i_show_table and na(_atbl)
     table.cell(_atbl, 2, 15, "ON", bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_center)
     table.cell(_atbl, 0, 16, "Config Score",   bgcolor=C_BG, text_color=C_WHT, text_size=size.small, text_halign=text.align_left)
 
-    // Row 17 - Footer
-    table.cell(_atbl, 0, 17, "Green=matches  Orange=adjust in Inputs", bgcolor=C_FTR, text_color=color.new(color.gray, 20), text_size=size.tiny, text_halign=text.align_left)
-    table.cell(_atbl, 1, 17, "", bgcolor=C_FTR, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_center)
-    table.cell(_atbl, 2, 17, "", bgcolor=C_FTR, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_center)
+    // Row 17 - Footer: risk per trade + break-even WR (data filled by BLOCK 3)
+    table.cell(_atbl, 0, 17, "Risk/trade  |  Break-even WR", bgcolor=C_FTR, text_color=color.new(color.gray, 20), text_size=size.tiny, text_halign=text.align_left)
+    table.cell(_atbl, 1, 17, "...", bgcolor=C_FTR, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_center)
+    table.cell(_atbl, 2, 17, "...", bgcolor=C_FTR, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_center)
 
 // --- BLOCK 2: Status indicator - updates on every tick (only the [ ~ ] cell)
 // Shows [ ~ ] while bar is forming, [ OK ] the instant the bar closes
@@ -568,3 +574,10 @@ if i_show_table and barstate.isconfirmed and not na(_atbl)
     _s_lbl = _score >= 5 ? "OPTIMAL" : _score >= 3 ? "ADJUST" : "REVIEW"
     table.cell(_atbl, 1, 16, str.tostring(_score) + " / 6", bgcolor=C_BG, text_color=_s_col, text_size=size.small, text_halign=text.align_center)
     table.cell(_atbl, 2, 16, _s_lbl, bgcolor=C_BG, text_color=_s_col, text_size=size.small, text_halign=text.align_center)
+
+    // Row 17 - Risk per trade + break-even win rate
+    _risk_disp  = strategy.equity * i_risk_pct / 100
+    _be_wr      = 1.0 / (1.0 + i_rr) * 100
+    _be_col     = _wr >= _be_wr ? C_GRN : C_RED
+    table.cell(_atbl, 1, 17, "$" + str.tostring(_risk_disp, "#.##"), bgcolor=C_FTR, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_center)
+    table.cell(_atbl, 2, 17, str.tostring(_be_wr, "#.1") + "%", bgcolor=C_FTR, text_color=_be_col, text_size=size.tiny, text_halign=text.align_center)
