@@ -120,6 +120,34 @@ Antes de dar por terminado un archivo Pine Script, verificar:
 
 ---
 
+---
+
+## REGLA 6 — Siempre guard array.size() > 0 antes de for i = 0 to array.size() - 1
+
+En Pine Script, `for i = 0 to -1` NO se salta automaticamente cuando el array esta vacio.
+Intentara ejecutar con i=0 y `array.get()` lanzara "Index 0 is out of bounds".
+
+### Incorrecto
+```pine
+for i = 0 to array.size(mi_array) - 1
+    val = array.get(mi_array, i)   // CRASH en bar 0 si array esta vacio
+```
+
+### Correcto
+```pine
+if array.size(mi_array) > 0
+    for i = 0 to array.size(mi_array) - 1
+        val = array.get(mi_array, i)
+```
+
+### Aplica a
+- Loops de invalidacion de zonas
+- Loops de deteccion de senales
+- Loops de visualizacion de zonas
+- Cualquier `for i = 0 to array.size(arr) - 1` sobre un array que puede estar vacio en bar 0
+
+---
+
 ## Referencia de errores comunes
 
 | Error | Causa probable |
