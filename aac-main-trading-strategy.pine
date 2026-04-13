@@ -305,8 +305,11 @@ if i_s1_enable
 // === SIGNAL AGGREGATION
 // ================================================================
 // To add module 2: append "or s2_sig_long" / "or s2_sig_short" at the end of each line
-final_sig_long  = in_bt_window and no_position and cooldown_ok and room_ok_long  and in_session and trend_ok_long  and s1_sig_long
-final_sig_short = in_bt_window and no_position and cooldown_ok and room_ok_short and in_session and trend_ok_short and s1_sig_short
+_raw_long  = in_bt_window and no_position and cooldown_ok and room_ok_long  and in_session and trend_ok_long  and s1_sig_long
+_raw_short = in_bt_window and no_position and cooldown_ok and room_ok_short and in_session and trend_ok_short and s1_sig_short
+// Mutual exclusion: if both fire on the same bar (overlapping zones), skip both
+final_sig_long  = _raw_long  and not _raw_short
+final_sig_short = _raw_short and not _raw_long
 
 // ================================================================
 // === SHARED - Trade Execution
