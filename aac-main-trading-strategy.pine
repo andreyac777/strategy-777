@@ -108,9 +108,13 @@ trend_ok_long  = not i_use_trend or (bull_bias and (not i_strict_trend or close 
 trend_ok_short = not i_use_trend or (bear_bias and (not i_strict_trend or close < slow_ma))
 no_position    = strategy.position_size == 0
 var int   _last_entry_bar = -999
+var int   _last_close_bar = -999
 var float _entry_tp       = na
 var float _entry_sl       = na
-cooldown_ok    = bar_index - _last_entry_bar > i_cooldown
+// cooldown applies from both last entry AND last exit: prevents immediate re-entry on same zone
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    _last_close_bar := bar_index
+cooldown_ok    = bar_index - _last_entry_bar > i_cooldown and bar_index - _last_close_bar > i_cooldown
 
 // Auto-suggest: TF-based recommended values (applied when i_auto_suggest is ON)
 _as_tf   = timeframe.period
@@ -158,12 +162,14 @@ var float[] s1_sz_bot   = array.new_float()
 var int[]   s1_sz_bar   = array.new_int()
 var bool[]  s1_sz_alive = array.new_bool()
 var int[]   s1_sz_uses  = array.new_int()
+var box[]   s1_sz_boxes = array.new_box()
 
 var float[] s1_dz_top   = array.new_float()
 var float[] s1_dz_bot   = array.new_float()
 var int[]   s1_dz_bar   = array.new_int()
 var bool[]  s1_dz_alive = array.new_bool()
 var int[]   s1_dz_uses  = array.new_int()
+var box[]   s1_dz_boxes = array.new_box()
 
 // --- Pivot Detection
 s1_ph        = ta.pivothigh(high, eff_pivot_l, eff_pivot_r)
@@ -172,31 +178,43 @@ s1_zone_half = atr14 * eff_zatr * 0.5
 
 // --- Register supply zone on pivot high
 if i_s1_enable and not na(s1_ph)
-    array.push(s1_sz_top,   s1_ph + s1_zone_half)
-    array.push(s1_sz_bot,   s1_ph - s1_zone_half)
-    array.push(s1_sz_bar,   bar_index - i_s1_pivot_r)
+    _zt = s1_ph + s1_zone_half
+    _zb = s1_ph - s1_zone_half
+    _zl = bar_index - i_s1_pivot_r
+    array.push(s1_sz_top,   _zt)
+    array.push(s1_sz_bot,   _zb)
+    array.push(s1_sz_bar,   _zl)
     array.push(s1_sz_alive, true)
     array.push(s1_sz_uses,  0)
+    array.push(s1_sz_boxes, box.new(left=_zl, top=_zt, right=bar_index + i_s1_extend, bottom=_zb,
+         bgcolor=color.new(color.red, i_s1_transp_z), border_color=color.new(color.red, 50), border_width=1))
     if array.size(s1_sz_top) > i_s1_max_zones
         array.shift(s1_sz_top)
         array.shift(s1_sz_bot)
         array.shift(s1_sz_bar)
         array.shift(s1_sz_alive)
         array.shift(s1_sz_uses)
+        box.delete(array.shift(s1_sz_boxes))
 
 // --- Register demand zone on pivot low
 if i_s1_enable and not na(s1_pl)
-    array.push(s1_dz_top,   s1_pl + s1_zone_half)
-    array.push(s1_dz_bot,   s1_pl - s1_zone_half)
-    array.push(s1_dz_bar,   bar_index - i_s1_pivot_r)
+    _zt = s1_pl + s1_zone_half
+    _zb = s1_pl - s1_zone_half
+    _zl = bar_index - i_s1_pivot_r
+    array.push(s1_dz_top,   _zt)
+    array.push(s1_dz_bot,   _zb)
+    array.push(s1_dz_bar,   _zl)
     array.push(s1_dz_alive, true)
     array.push(s1_dz_uses,  0)
+    array.push(s1_dz_boxes, box.new(left=_zl, top=_zt, right=bar_index + i_s1_extend, bottom=_zb,
+         bgcolor=color.new(color.green, i_s1_transp_z), border_color=color.new(color.green, 50), border_width=1))
     if array.size(s1_dz_top) > i_s1_max_zones
         array.shift(s1_dz_top)
         array.shift(s1_dz_bot)
         array.shift(s1_dz_bar)
         array.shift(s1_dz_alive)
         array.shift(s1_dz_uses)
+        box.delete(array.shift(s1_dz_boxes))
 
 // --- Invalidate on body close-through
 if i_s1_enable and i_s1_inval
@@ -261,35 +279,16 @@ if i_s1_min_room > 0
                 if _dt < close and close - _dt < _room_dist
                     room_ok_short := false
 
-// --- Zone Visualization
-var box[] s1_s_boxes = array.new_box()
-var box[] s1_d_boxes = array.new_box()
-
-if i_s1_enable and barstate.islast
-    for b in s1_s_boxes
-        box.delete(b)
-    array.clear(s1_s_boxes)
-    for b in s1_d_boxes
-        box.delete(b)
-    array.clear(s1_d_boxes)
-
+// --- Zone Extension (update right edge each bar so active zones follow price)
+if i_s1_enable
     if array.size(s1_sz_alive) > 0
         for i = 0 to array.size(s1_sz_alive) - 1
             if array.get(s1_sz_alive, i)
-                b = box.new(left=array.get(s1_sz_bar, i), top=array.get(s1_sz_top, i),
-                     right=bar_index + i_s1_extend, bottom=array.get(s1_sz_bot, i),
-                     bgcolor=color.new(color.red, i_s1_transp_z),
-                     border_color=color.new(color.red, 50), border_width=1)
-                array.push(s1_s_boxes, b)
-
+                box.set_right(array.get(s1_sz_boxes, i), bar_index + i_s1_extend)
     if array.size(s1_dz_alive) > 0
         for i = 0 to array.size(s1_dz_alive) - 1
             if array.get(s1_dz_alive, i)
-                b = box.new(left=array.get(s1_dz_bar, i), top=array.get(s1_dz_top, i),
-                     right=bar_index + i_s1_extend, bottom=array.get(s1_dz_bot, i),
-                     bgcolor=color.new(color.green, i_s1_transp_z),
-                     border_color=color.new(color.green, 50), border_width=1)
-                array.push(s1_d_boxes, b)
+                box.set_right(array.get(s1_dz_boxes, i), bar_index + i_s1_extend)
 
 // ================================================================
 // ================================================================
