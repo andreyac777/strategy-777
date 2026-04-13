@@ -107,7 +107,9 @@ in_session     = i_filter_sess ? not na(time(timeframe.period, i_session, i_tz))
 trend_ok_long  = not i_use_trend or (bull_bias and (not i_strict_trend or close > slow_ma))
 trend_ok_short = not i_use_trend or (bear_bias and (not i_strict_trend or close < slow_ma))
 no_position    = strategy.position_size == 0
-var int _last_entry_bar = -999
+var int   _last_entry_bar = -999
+var float _entry_tp       = na
+var float _entry_sl       = na
 cooldown_ok    = bar_index - _last_entry_bar > i_cooldown
 
 // Auto-suggest: TF-based recommended values (applied when i_auto_suggest is ON)
@@ -324,6 +326,8 @@ _qty      = math.max(_risk_usd / (sl_dist * _pv), syminfo.mintick)
 
 if final_sig_long
     strategy.entry("Long", strategy.long, qty=_qty, comment="BUY NOW")
+    _entry_tp       := long_tp
+    _entry_sl       := long_sl
     _last_entry_bar := bar_index
     if s1_dz_hit_idx >= 0 and s1_dz_hit_idx < array.size(s1_dz_uses)
         _u = array.get(s1_dz_uses, s1_dz_hit_idx) + 1
@@ -333,6 +337,8 @@ if final_sig_long
 
 if final_sig_short
     strategy.entry("Short", strategy.short, qty=_qty, comment="SELL NOW")
+    _entry_tp       := short_tp
+    _entry_sl       := short_sl
     _last_entry_bar := bar_index
     if s1_sz_hit_idx >= 0 and s1_sz_hit_idx < array.size(s1_sz_uses)
         _u = array.get(s1_sz_uses, s1_sz_hit_idx) + 1
@@ -346,7 +352,7 @@ if strategy.position_size > 0
              trail_points=math.round(atr14 * i_trail_mult / syminfo.mintick),
              trail_offset=math.round(atr14 * i_trail_mult / syminfo.mintick))
     else
-        strategy.exit("Long Exit", "Long", limit=long_tp, stop=long_sl)
+        strategy.exit("Long Exit", "Long", limit=_entry_tp, stop=_entry_sl)
 
 if strategy.position_size < 0
     if i_use_trail
@@ -354,7 +360,7 @@ if strategy.position_size < 0
              trail_points=math.round(atr14 * i_trail_mult / syminfo.mintick),
              trail_offset=math.round(atr14 * i_trail_mult / syminfo.mintick))
     else
-        strategy.exit("Short Exit", "Short", limit=short_tp, stop=short_sl)
+        strategy.exit("Short Exit", "Short", limit=_entry_tp, stop=_entry_sl)
 
 // ================================================================
 // === SHARED - Visual Engine
