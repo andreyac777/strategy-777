@@ -136,10 +136,12 @@ i_s1_pivot_r   = input.int(5, "Pivot Right Bars", minval=1, group=g_s1)
 i_s1_zone_atr  = input.float(0.5, "Zone Width (ATR mult)", minval=0.1, step=0.05, group=g_s1)
 i_s1_extend    = input.int(100, "Zone Extension (bars right)", minval=10, group=g_s1)
 i_s1_max_zones = input.int(3, "Max Active Zones per Side", minval=1, maxval=5, group=g_s1)
-i_s1_inval     = input.bool(true, "Invalidate on Body Close-Through", group=g_s1)
-i_s1_touch     = input.string("Rejection Bar", "Entry Trigger", options=["Wick Touch","Rejection Bar","Body Close Inside"], group=g_s1)
-i_s1_longs     = input.bool(true, "Enable Longs", group=g_s1)
-i_s1_shorts    = input.bool(true, "Enable Shorts", group=g_s1)
+i_s1_inval      = input.bool(true, "Invalidate on Body Close-Through", group=g_s1)
+i_s1_touch      = input.string("Rejection Bar", "Entry Trigger", options=["Wick Touch","Rejection Bar","Body Close Inside"], group=g_s1)
+i_s1_max_uses   = input.int(2, "Max Signals per Zone", minval=1, maxval=10, group=g_s1)
+i_s1_min_room   = input.int(50, "Min Room to Opposing Zone (ticks)", minval=0, group=g_s1)
+i_s1_longs      = input.bool(true, "Enable Longs", group=g_s1)
+i_s1_shorts     = input.bool(true, "Enable Shorts", group=g_s1)
 i_s1_transp_z  = input.int(82, "Zone Transparency", minval=50, maxval=95, group=g_s1)
 
 // Effective Module 1 parameters (override with suggested values when Auto-Suggest is ON)
@@ -153,11 +155,13 @@ var float[] s1_sz_top   = array.new_float()
 var float[] s1_sz_bot   = array.new_float()
 var int[]   s1_sz_bar   = array.new_int()
 var bool[]  s1_sz_alive = array.new_bool()
+var int[]   s1_sz_uses  = array.new_int()
 
 var float[] s1_dz_top   = array.new_float()
 var float[] s1_dz_bot   = array.new_float()
 var int[]   s1_dz_bar   = array.new_int()
 var bool[]  s1_dz_alive = array.new_bool()
+var int[]   s1_dz_uses  = array.new_int()
 
 // --- Pivot Detection
 s1_ph        = ta.pivothigh(high, eff_pivot_l, eff_pivot_r)
@@ -170,11 +174,13 @@ if i_s1_enable and not na(s1_ph)
     array.push(s1_sz_bot,   s1_ph - s1_zone_half)
     array.push(s1_sz_bar,   bar_index - i_s1_pivot_r)
     array.push(s1_sz_alive, true)
+    array.push(s1_sz_uses,  0)
     if array.size(s1_sz_top) > i_s1_max_zones
         array.shift(s1_sz_top)
         array.shift(s1_sz_bot)
         array.shift(s1_sz_bar)
         array.shift(s1_sz_alive)
+        array.shift(s1_sz_uses)
 
 // --- Register demand zone on pivot low
 if i_s1_enable and not na(s1_pl)
@@ -182,11 +188,13 @@ if i_s1_enable and not na(s1_pl)
     array.push(s1_dz_bot,   s1_pl - s1_zone_half)
     array.push(s1_dz_bar,   bar_index - i_s1_pivot_r)
     array.push(s1_dz_alive, true)
+    array.push(s1_dz_uses,  0)
     if array.size(s1_dz_top) > i_s1_max_zones
         array.shift(s1_dz_top)
         array.shift(s1_dz_bot)
         array.shift(s1_dz_bar)
         array.shift(s1_dz_alive)
+        array.shift(s1_dz_uses)
 
 // --- Invalidate on body close-through
 if i_s1_enable and i_s1_inval
@@ -199,9 +207,13 @@ if i_s1_enable and i_s1_inval
             if array.get(s1_dz_alive, i) and close < array.get(s1_dz_bot, i)
                 array.set(s1_dz_alive, i, false)
 
-// --- Entry signals
+// --- Entry signals (tracks which zone index triggered, for use-count bookkeeping)
 s1_in_supply = false
 s1_in_demand = false
+var int s1_sz_hit_idx = -1
+var int s1_dz_hit_idx = -1
+s1_sz_hit_idx := -1
+s1_dz_hit_idx := -1
 
 if i_s1_enable
     if array.size(s1_sz_alive) > 0
@@ -210,7 +222,9 @@ if i_s1_enable
                 zt = array.get(s1_sz_top, i)
                 zb = array.get(s1_sz_bot, i)
                 _hit = eff_touch == "Wick Touch" ? (high >= zb and low <= zt) : eff_touch == "Rejection Bar" ? (high >= zb and close < (high + low) / 2 and close <= zt) : (close >= zb and close <= zt)
-                s1_in_supply := s1_in_supply or _hit
+                if _hit
+                    s1_in_supply  := true
+                    s1_sz_hit_idx := i
 
     if array.size(s1_dz_alive) > 0
         for i = 0 to array.size(s1_dz_alive) - 1
@@ -218,10 +232,32 @@ if i_s1_enable
                 zt = array.get(s1_dz_top, i)
                 zb = array.get(s1_dz_bot, i)
                 _hit = eff_touch == "Wick Touch" ? (high >= zb and low <= zt) : eff_touch == "Rejection Bar" ? (low <= zt and close > (high + low) / 2 and close >= zb) : (close >= zb and close <= zt)
-                s1_in_demand := s1_in_demand or _hit
+                if _hit
+                    s1_in_demand  := true
+                    s1_dz_hit_idx := i
 
 s1_sig_long  = i_s1_enable and i_s1_longs  and s1_in_demand
 s1_sig_short = i_s1_enable and i_s1_shorts and s1_in_supply
+
+// --- Minimum room to opposing zone check
+// Long: nearest alive supply zone bottom must be >= min_room ticks above close
+// Short: nearest alive demand zone top must be >= min_room ticks below close
+_room_dist   = i_s1_min_room * syminfo.mintick
+room_ok_long  = true
+room_ok_short = true
+if i_s1_min_room > 0
+    if array.size(s1_sz_alive) > 0
+        for i = 0 to array.size(s1_sz_alive) - 1
+            if array.get(s1_sz_alive, i)
+                _sb = array.get(s1_sz_bot, i)
+                if _sb > close and _sb - close < _room_dist
+                    room_ok_long := false
+    if array.size(s1_dz_alive) > 0
+        for i = 0 to array.size(s1_dz_alive) - 1
+            if array.get(s1_dz_alive, i)
+                _dt = array.get(s1_dz_top, i)
+                if _dt < close and close - _dt < _room_dist
+                    room_ok_short := false
 
 // --- Zone Visualization
 var box[] s1_s_boxes = array.new_box()
@@ -269,8 +305,8 @@ if i_s1_enable and barstate.islast
 // === SIGNAL AGGREGATION
 // ================================================================
 // To add module 2: append "or s2_sig_long" / "or s2_sig_short" at the end of each line
-final_sig_long  = in_bt_window and no_position and cooldown_ok and in_session and trend_ok_long  and s1_sig_long
-final_sig_short = in_bt_window and no_position and cooldown_ok and in_session and trend_ok_short and s1_sig_short
+final_sig_long  = in_bt_window and no_position and cooldown_ok and room_ok_long  and in_session and trend_ok_long  and s1_sig_long
+final_sig_short = in_bt_window and no_position and cooldown_ok and room_ok_short and in_session and trend_ok_short and s1_sig_short
 
 // ================================================================
 // === SHARED - Trade Execution
@@ -289,10 +325,20 @@ _qty      = math.max(_risk_usd / (sl_dist * _pv), syminfo.mintick)
 if final_sig_long
     strategy.entry("Long", strategy.long, qty=_qty, comment="BUY NOW")
     _last_entry_bar := bar_index
+    if s1_dz_hit_idx >= 0 and s1_dz_hit_idx < array.size(s1_dz_uses)
+        _u = array.get(s1_dz_uses, s1_dz_hit_idx) + 1
+        array.set(s1_dz_uses, s1_dz_hit_idx, _u)
+        if _u >= i_s1_max_uses
+            array.set(s1_dz_alive, s1_dz_hit_idx, false)
 
 if final_sig_short
     strategy.entry("Short", strategy.short, qty=_qty, comment="SELL NOW")
     _last_entry_bar := bar_index
+    if s1_sz_hit_idx >= 0 and s1_sz_hit_idx < array.size(s1_sz_uses)
+        _u = array.get(s1_sz_uses, s1_sz_hit_idx) + 1
+        array.set(s1_sz_uses, s1_sz_hit_idx, _u)
+        if _u >= i_s1_max_uses
+            array.set(s1_sz_alive, s1_sz_hit_idx, false)
 
 if strategy.position_size > 0
     if i_use_trail
