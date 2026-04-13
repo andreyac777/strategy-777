@@ -61,7 +61,6 @@ i_cooldown   = input.int(0, "Entry Cooldown (bars after last entry)", minval=0, 
 var g_session  = "Session"
 i_filter_sess  = input.bool(false, "Filter by Session", group=g_session)
 i_session      = input.session("0930-1600", "Trading Session", group=g_session)
-i_tz           = input.string("America/New_York", "Timezone", group=g_session)
 
 // ================================================================
 // === SHARED - Visual
@@ -103,7 +102,7 @@ slow_ma   = _ma(close, i_ma_slow, i_ma_type)
 bull_bias = fast_ma > slow_ma
 bear_bias = fast_ma < slow_ma
 
-in_session     = i_filter_sess ? not na(time(timeframe.period, i_session, i_tz)) : true
+in_session     = i_filter_sess ? not na(time(timeframe.period, i_session, syminfo.timezone)) : true
 trend_ok_long  = not i_use_trend or (bull_bias and (not i_strict_trend or close > slow_ma))
 trend_ok_short = not i_use_trend or (bear_bias and (not i_strict_trend or close < slow_ma))
 no_position    = strategy.position_size == 0
