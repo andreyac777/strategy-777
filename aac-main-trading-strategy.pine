@@ -37,11 +37,12 @@ in_bt_window = time >= i_bt_from and time <= i_bt_to
 // ================================================================
 // === SHARED - Trend
 // ================================================================
-var g_trend  = "Trend"
-i_ma_type    = input.string("EMA", "MA Type", options=["EMA","SMA","WMA"], group=g_trend)
-i_ma_fast    = input.int(20, "Fast MA Length", minval=2, group=g_trend)
-i_ma_slow    = input.int(50, "Slow MA Length", minval=2, group=g_trend)
-i_use_trend  = input.bool(true, "Filter by Trend", group=g_trend)
+var g_trend      = "Trend"
+i_ma_type        = input.string("EMA", "MA Type", options=["EMA","SMA","WMA"], group=g_trend)
+i_ma_fast        = input.int(20, "Fast MA Length", minval=2, group=g_trend)
+i_ma_slow        = input.int(50, "Slow MA Length", minval=2, group=g_trend)
+i_use_trend      = input.bool(true, "Filter by Trend", group=g_trend)
+i_strict_trend   = input.bool(false, "Strict Trend (close must be above/below Slow MA)", group=g_trend)
 
 // ================================================================
 // === SHARED - Risk Management
@@ -52,6 +53,7 @@ i_rr         = input.float(2.0, "Risk / Reward Ratio", minval=0.5, step=0.1, gro
 i_risk_pct   = input.float(1.0, "Risk % per Trade (of equity)", minval=0.1, maxval=10.0, step=0.1, group=g_risk)
 i_use_trail  = input.bool(false, "Use Trailing Stop", group=g_risk)
 i_trail_mult = input.float(1.0, "Trailing Distance (ATR mult)", minval=0.1, step=0.1, group=g_risk)
+i_cooldown   = input.int(0, "Entry Cooldown (bars after last entry)", minval=0, step=1, group=g_risk)
 
 // ================================================================
 // === SHARED - Session Filter
@@ -102,9 +104,11 @@ bull_bias = fast_ma > slow_ma
 bear_bias = fast_ma < slow_ma
 
 in_session     = i_filter_sess ? not na(time(timeframe.period, i_session, i_tz)) : true
-trend_ok_long  = not i_use_trend or bull_bias
-trend_ok_short = not i_use_trend or bear_bias
+trend_ok_long  = not i_use_trend or (bull_bias and (not i_strict_trend or close > slow_ma))
+trend_ok_short = not i_use_trend or (bear_bias and (not i_strict_trend or close < slow_ma))
 no_position    = strategy.position_size == 0
+var int _last_entry_bar = -999
+cooldown_ok    = bar_index - _last_entry_bar > i_cooldown
 
 // Auto-suggest: TF-based recommended values (applied when i_auto_suggest is ON)
 _as_tf   = timeframe.period
@@ -265,8 +269,8 @@ if i_s1_enable and barstate.islast
 // === SIGNAL AGGREGATION
 // ================================================================
 // To add module 2: append "or s2_sig_long" / "or s2_sig_short" at the end of each line
-final_sig_long  = in_bt_window and no_position and in_session and trend_ok_long  and s1_sig_long
-final_sig_short = in_bt_window and no_position and in_session and trend_ok_short and s1_sig_short
+final_sig_long  = in_bt_window and no_position and cooldown_ok and in_session and trend_ok_long  and s1_sig_long
+final_sig_short = in_bt_window and no_position and cooldown_ok and in_session and trend_ok_short and s1_sig_short
 
 // ================================================================
 // === SHARED - Trade Execution
@@ -284,9 +288,11 @@ _qty      = math.max(_risk_usd / (sl_dist * _pv), syminfo.mintick)
 
 if final_sig_long
     strategy.entry("Long", strategy.long, qty=_qty, comment="BUY NOW")
+    _last_entry_bar := bar_index
 
 if final_sig_short
     strategy.entry("Short", strategy.short, qty=_qty, comment="SELL NOW")
+    _last_entry_bar := bar_index
 
 if strategy.position_size > 0
     if i_use_trail
@@ -312,13 +318,13 @@ if strategy.position_size < 0
 plot(i_show_mas ? fast_ma : na, "Fast MA", color=color.new(color.aqua, 20), linewidth=1)
 plot(i_show_mas ? slow_ma : na, "Slow MA", color=color.new(color.orange, 20), linewidth=2)
 
-// BUY / SELL labels
+// BUY / SELL labels - edge only: show on first bar signal fires, not on every repeat
 if i_show_labels
-    if final_sig_long
+    if final_sig_long and not final_sig_long[1]
         label.new(bar_index, low - atr14 * 0.8, "BUY NOW",
              style=label.style_label_up, color=color.new(color.green, 5),
              textcolor=color.white, size=size.normal)
-    if final_sig_short
+    if final_sig_short and not final_sig_short[1]
         label.new(bar_index, high + atr14 * 0.8, "SELL NOW",
              style=label.style_label_down, color=color.new(color.red, 5),
              textcolor=color.white, size=size.normal)
