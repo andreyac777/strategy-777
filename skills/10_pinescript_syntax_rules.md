@@ -172,12 +172,26 @@ if i_show_rr and (final_sig_long or final_sig_short)
     _tp_amt = str.tostring(math.abs(_tp - _ep) * _qty, "#.##")
 ```
 
+### FIXTURE PERMANENTE: _qty en el bloque visual
+La linea `_qty = final_sig_long ? _qty_long : _qty_short` dentro del bloque
+`if i_show_rr and (final_sig_long or final_sig_short)` es una FIXTURE PERMANENTE.
+Debe existir SIEMPRE, independientemente de si se esta renombrando algo.
+Antes de entregar cualquier edit que toque Trade Execution o Visual Engine, verificar:
+
+```bash
+grep -n "_qty" aac-main-trading-strategy.pine | grep "final_sig_long"
+# debe devolver: <linea>:    _qty = final_sig_long ? _qty_long : _qty_short
+```
+
+Si no devuelve esa linea, la fixture esta rota y el script lanzara "Undeclared identifier '_qty'".
+
 ### Checklist al renombrar variables
 - [ ] Buscar TODAS las ocurrencias con grep: `grep -n "_nombre_viejo" archivo.pine`
 - [ ] Verificar secciones visuales (R/R boxes, labels, debug)
 - [ ] Verificar seccion de debug labels
 - [ ] Verificar seccion de tabla analyzer
 - [ ] No asumir que solo la seccion editada usa la variable
+- [ ] Confirmar que la fixture `_qty = final_sig_long ? _qty_long : _qty_short` sigue en el bloque visual
 
 ---
 
