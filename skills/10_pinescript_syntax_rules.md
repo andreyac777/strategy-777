@@ -181,6 +181,46 @@ if i_show_rr and (final_sig_long or final_sig_short)
 
 ---
 
+---
+
+## REGLA 8 — Aislamiento de modulos: SIEMPRE confirmar antes de tocar codigo compartido
+
+Este archivo contiene multiples modulos (M1, M2, ...) conectados por una capa compartida.
+Las secciones compartidas son: Signal Aggregation, Trade Execution, Visual Engine, Risk,
+Session, Debug, Analyzer Table, y el Module Selector.
+
+### Patron peligroso
+Cuando el usuario pide un cambio en M2, una edicion "quirurgica" que parece local puede:
+- Modificar variables de Signal Aggregation que afectan M1
+- Cambiar la logica de SL/TP compartida que M1 tambien usa
+- Eliminar o alterar el Module Selector
+- Tocar el bloque Visual Engine o la tabla Analyzer (ambos leen `_use_s1` / `_use_s2`)
+
+### Regla obligatoria
+Antes de editar cualquier linea fuera del bloque `MODULE 2` (delimitado por los comentarios
+`=== MODULE 2` y `=== SIGNAL AGGREGATION`), hacer una pausa y preguntar al usuario:
+
+> "Este cambio afecta [nombre de la seccion compartida]. Confirmas que quieres modificarla,
+> o prefieres que lo resuelva solo dentro del bloque M2?"
+
+### Secciones que requieren confirmacion explicita
+| Seccion | Zona en el archivo | Razon |
+|---|---|---|
+| Module Selector | `var g_mod` / `i_active_module` | Controla _use_s1 y _use_s2 para ambos modulos |
+| Signal Aggregation | `_use_s1`, `_use_s2`, `_raw_long/short`, `final_sig_*` | Cambiar aqui rompe ambos modulos |
+| Trade Execution | `strategy.entry`, `strategy.exit`, `_entry_tp/sl` | Compartido; M1 y M2 usan los mismos ordenes |
+| Visual Engine | `_v_*` arrays, R/R boxes, labels | Lee `_use_s2` para display; cambios afectan ambos |
+| Analyzer Table | `_atbl`, `BLOCK 1/2/3` | Tabla unica para toda la estrategia |
+| Risk compartido | `sl_dist`, `tp_dist`, `eff_sl_m`, `eff_rr_v` | M1 los usa directamente |
+
+### Checklist al recibir una tarea de M2
+- [ ] Identificar si el cambio pedido esta 100% dentro del bloque MODULE 2
+- [ ] Si la solucion requiere tocar Signal Aggregation o Trade Execution, PREGUNTAR primero
+- [ ] Nunca mover ni eliminar el bloque `=== MODULE SELECTOR ===`
+- [ ] Verificar con grep que los arrays `_use_s1` / `_use_s2` siguen intactos despues de editar
+
+---
+
 ## Referencia de errores comunes
 
 | Error | Causa probable |
