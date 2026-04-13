@@ -364,247 +364,132 @@ if i_s1_enable
 
 // ================================================================
 // ================================================================
-// === MODULE 2: Order Block + SMA
+// === MODULE 2: S/R Zones (Ceiling + Floor)
 // ================================================================
 // ================================================================
 
-var g_s2          = "M2: Order Block + SMA"
+var g_s2         = "M2: Order Block + SMA"
 
-// --- SMA Trend Filter
-i_s2_sma_len      = input.int(200,   "SMA Period",                      minval=2,              group=g_s2)
-i_s2_use_sma      = input.bool(true,  "Filter by SMA Direction",                               group=g_s2)
-i_s2_slope_filter = input.bool(false, "SMA Slope Filter (slope must agree)",                   group=g_s2)
-i_s2_slope_lb     = input.int(5,     "Slope Lookback (bars)",           minval=1,              group=g_s2)
-
-// --- Order Block Parameters
-i_s2_min_disp     = input.float(1.5, "Min Impulse Body (ATR mult)",     minval=0.2, step=0.1, group=g_s2)
-i_s2_min_ob_body  = input.float(0.3, "Min OB Body (ATR mult)",          minval=0.05,step=0.05,group=g_s2)
-i_s2_lookback     = input.int(5,     "Search Lookback for OB (bars)",   minval=1, maxval=20,  group=g_s2)
-i_s2_max_ob       = input.int(3,     "Max Active OBs per Side",         minval=1, maxval=5,   group=g_s2)
-i_s2_extend       = input.int(100,   "OB Extension (bars right)",       minval=10,            group=g_s2)
-i_s2_max_uses     = input.int(1,     "Max Entries per OB",              minval=1, maxval=5,   group=g_s2)
-
-// --- Range Filter
-i_s2_range_filter = input.bool(true,  "Range Filter (ATR compression)",                       group=g_s2)
-i_s2_range_thresh = input.float(0.7, "Range Threshold (current/avg ATR ratio)",
-     minval=0.1, maxval=1.0, step=0.05,                                                        group=g_s2)
-
-// --- Entry Confirmation
-i_s2_confirm      = input.string("Rejection Bar", "Entry Confirmation",
-     options=["Wick Touch","Close Inside","Rejection Bar","Confirm Close"],                    group=g_s2)
-
-// --- Risk Management (M2 own parameters, independent from M1 Risk group)
-i_s2_sl_buf       = input.float(0.2, "SL Buffer (ATR mult)",            minval=0.05,step=0.05,group=g_s2)
-i_s2_rr           = input.float(2.0, "Risk/Reward Ratio",               minval=0.5, step=0.1, group=g_s2)
-
-// --- Enable sides
-i_s2_longs        = input.bool(true,  "Enable Longs",                                         group=g_s2)
-i_s2_shorts       = input.bool(true,  "Enable Shorts",                                        group=g_s2)
-
-// --- Visuals
-i_s2_transp       = input.int(82,    "OB Transparency",                 minval=50, maxval=95, group=g_s2)
-i_s2_show_sma     = input.bool(true,  "Show SMA on Chart",                                    group=g_s2)
-i_s2_show_sr      = input.bool(true,  "Show OB Mid Lines",                                    group=g_s2)
+// --- Zone Parameters
+i_s2_lookback    = input.int(10,   "Lookback for opposite candle (bars)", minval=1, maxval=30,  group=g_s2)
+i_s2_max_zones   = input.int(5,    "Max Active Zones per Side",           minval=1, maxval=10,  group=g_s2)
+i_s2_transp      = input.int(82,   "Zone Transparency",                   minval=50, maxval=95, group=g_s2)
+i_s2_show_mid    = input.bool(true, "Show Zone Mid Lines",                                      group=g_s2)
 
 // ================================================================
 // === MODULE 2 - Calculations
 // ================================================================
 
-// --- SMA and trend bias
-s2_sma        = ta.sma(close, i_s2_sma_len)
-s2_bull_trend = not i_s2_use_sma or close > s2_sma
-s2_bear_trend = not i_s2_use_sma or close < s2_sma
-s2_sma_slope  = s2_sma - s2_sma[i_s2_slope_lb]
-s2_bull_slope = not i_s2_slope_filter or s2_sma_slope > 0
-s2_bear_slope = not i_s2_slope_filter or s2_sma_slope < 0
+// CEILING (techo rojo): bearish candle closes below the low of a recent bullish candle
+//   => support broken downward
+//   zone top    = max(high of bullish candle, high of breaking bearish candle) -- biggest upper wick
+//   zone bottom = open of bullish candle (bottom of its body)
+//   lifetime    = extends right until a bullish close breaks above zone top, then frozen
 
-// --- Range filter: current ATR below threshold of its own average = compression = range market
-s2_atr_avg   = ta.sma(atr14, 50)
-s2_in_range  = i_s2_range_filter and (s2_atr_avg > 0 ? atr14 / s2_atr_avg : 1.0) < i_s2_range_thresh
+var float[] s2_ceil_top   = array.new_float()
+var float[] s2_ceil_bot   = array.new_float()
+var bool[]  s2_ceil_alive = array.new_bool()
+var box[]   s2_ceil_boxes = array.new_box()
+var line[]  s2_ceil_lines = array.new_line()
 
-// --- Order Block data arrays
-// Bearish OB (supply): last bullish candle before a bearish impulse -> short setup
-var float[] s2_bob_top     = array.new_float()
-var float[] s2_bob_bot     = array.new_float()
-var int[]   s2_bob_bar     = array.new_int()
-var bool[]  s2_bob_alive   = array.new_bool()
-var int[]   s2_bob_uses    = array.new_int()
-var int[]   s2_bob_created = array.new_int()   // bar_index when OB was registered (impulse bar)
-var box[]   s2_bob_boxes   = array.new_box()
-var line[]  s2_bob_lines   = array.new_line()
+// FLOOR (piso verde): bullish candle closes above the high of a recent bearish candle
+//   => resistance broken upward
+//   zone top    = open of bearish candle (top of its body)
+//   zone bottom = min(low of bearish candle, low of breaking bullish candle) -- biggest lower wick
+//   lifetime    = extends right until a bearish close breaks below zone bottom, then frozen
 
-// Bullish OB (demand): last bearish candle before a bullish impulse -> long setup
-var float[] s2_buob_top     = array.new_float()
-var float[] s2_buob_bot     = array.new_float()
-var int[]   s2_buob_bar     = array.new_int()
-var bool[]  s2_buob_alive   = array.new_bool()
-var int[]   s2_buob_uses    = array.new_int()
-var int[]   s2_buob_created = array.new_int()  // bar_index when OB was registered (impulse bar)
-var box[]   s2_buob_boxes   = array.new_box()
-var line[]  s2_buob_lines   = array.new_line()
+var float[] s2_floor_top   = array.new_float()
+var float[] s2_floor_bot   = array.new_float()
+var bool[]  s2_floor_alive = array.new_bool()
+var box[]   s2_floor_boxes = array.new_box()
+var line[]  s2_floor_lines = array.new_line()
 
-// --- Bearish OB detection
-// Condition: current bar is a strong bearish impulse (body >= min_disp * ATR)
-// Action: look back for the last bullish candle -> that is the bearish OB
-s2_bear_impulse = close < open and math.abs(close - open) >= i_s2_min_disp * atr14
-
-if i_active_module == "M2: Order Block + SMA" and s2_bear_impulse
+// --- Ceiling creation: bearish candle closes below a recent bullish candle's low
+if i_active_module == "M2: Order Block + SMA" and close < open
     _found = false
     for j = 1 to math.min(i_s2_lookback, bar_index)
-        // OB candle must be bullish, have minimum body, AND impulse close must break below OB candle low (BOS)
-        if not _found and close[j] > open[j] and math.abs(close[j] - open[j]) >= i_s2_min_ob_body * atr14 and close < low[j]
+        if not _found and close[j] > open[j] and close < low[j]
             _found := true
-            _zt  = math.max(open[j], close[j])
-            _zb  = math.min(open[j], close[j])
+            _zt  = math.max(high[j], high)
+            _zb  = open[j]
             _mid = (_zt + _zb) / 2
             _zl  = bar_index - j
-            array.push(s2_bob_top,     _zt)
-            array.push(s2_bob_bot,     _zb)
-            array.push(s2_bob_bar,     _zl)
-            array.push(s2_bob_alive,   true)
-            array.push(s2_bob_uses,    0)
-            array.push(s2_bob_created, bar_index)
-            array.push(s2_bob_boxes, box.new(left=_zl, top=_zt, right=bar_index + i_s2_extend, bottom=_zb,
+            array.push(s2_ceil_top,   _zt)
+            array.push(s2_ceil_bot,   _zb)
+            array.push(s2_ceil_alive, true)
+            array.push(s2_ceil_boxes, box.new(left=_zl, top=_zt, right=bar_index + 5000, bottom=_zb,
                  bgcolor=color.new(color.red, i_s2_transp), border_color=color.new(color.red, 40), border_width=1))
-            array.push(s2_bob_lines, line.new(x1=_zl, y1=_mid, x2=bar_index + i_s2_extend, y2=_mid,
+            array.push(s2_ceil_lines, line.new(x1=_zl, y1=_mid, x2=bar_index + 5000, y2=_mid,
                  color=color.new(color.red, 20), style=line.style_dashed, width=1))
-            if array.size(s2_bob_top) > i_s2_max_ob
-                array.shift(s2_bob_top)
-                array.shift(s2_bob_bot)
-                array.shift(s2_bob_bar)
-                array.shift(s2_bob_alive)
-                array.shift(s2_bob_uses)
-                array.shift(s2_bob_created)
-                box.delete(array.shift(s2_bob_boxes))
-                line.delete(array.shift(s2_bob_lines))
+            if array.size(s2_ceil_top) > i_s2_max_zones
+                array.shift(s2_ceil_top)
+                array.shift(s2_ceil_bot)
+                array.shift(s2_ceil_alive)
+                box.delete(array.shift(s2_ceil_boxes))
+                line.delete(array.shift(s2_ceil_lines))
 
-// --- Bullish OB detection
-// Condition: current bar is a strong bullish impulse (body >= min_disp * ATR)
-// Action: look back for the last bearish candle -> that is the bullish OB
-s2_bull_impulse = close > open and math.abs(close - open) >= i_s2_min_disp * atr14
-
-if i_active_module == "M2: Order Block + SMA" and s2_bull_impulse
+// --- Floor creation: bullish candle closes above a recent bearish candle's high
+if i_active_module == "M2: Order Block + SMA" and close > open
     _found = false
     for j = 1 to math.min(i_s2_lookback, bar_index)
-        // OB candle must be bearish, have minimum body, AND impulse close must break above OB candle high (BOS)
-        if not _found and close[j] < open[j] and math.abs(close[j] - open[j]) >= i_s2_min_ob_body * atr14 and close > high[j]
+        if not _found and close[j] < open[j] and close > high[j]
             _found := true
-            _zt  = math.max(open[j], close[j])
-            _zb  = math.min(open[j], close[j])
+            _zt  = open[j]
+            _zb  = math.min(low[j], low)
             _mid = (_zt + _zb) / 2
             _zl  = bar_index - j
-            array.push(s2_buob_top,     _zt)
-            array.push(s2_buob_bot,     _zb)
-            array.push(s2_buob_bar,     _zl)
-            array.push(s2_buob_alive,   true)
-            array.push(s2_buob_uses,    0)
-            array.push(s2_buob_created, bar_index)
-            array.push(s2_buob_boxes, box.new(left=_zl, top=_zt, right=bar_index + i_s2_extend, bottom=_zb,
+            array.push(s2_floor_top,   _zt)
+            array.push(s2_floor_bot,   _zb)
+            array.push(s2_floor_alive, true)
+            array.push(s2_floor_boxes, box.new(left=_zl, top=_zt, right=bar_index + 5000, bottom=_zb,
                  bgcolor=color.new(color.green, i_s2_transp), border_color=color.new(color.green, 40), border_width=1))
-            array.push(s2_buob_lines, line.new(x1=_zl, y1=_mid, x2=bar_index + i_s2_extend, y2=_mid,
+            array.push(s2_floor_lines, line.new(x1=_zl, y1=_mid, x2=bar_index + 5000, y2=_mid,
                  color=color.new(color.green, 20), style=line.style_dashed, width=1))
-            if array.size(s2_buob_top) > i_s2_max_ob
-                array.shift(s2_buob_top)
-                array.shift(s2_buob_bot)
-                array.shift(s2_buob_bar)
-                array.shift(s2_buob_alive)
-                array.shift(s2_buob_uses)
-                array.shift(s2_buob_created)
-                box.delete(array.shift(s2_buob_boxes))
-                line.delete(array.shift(s2_buob_lines))
+            if array.size(s2_floor_top) > i_s2_max_zones
+                array.shift(s2_floor_top)
+                array.shift(s2_floor_bot)
+                array.shift(s2_floor_alive)
+                box.delete(array.shift(s2_floor_boxes))
+                line.delete(array.shift(s2_floor_lines))
 
-// --- OB Invalidation: close beyond zone kills it; grey out dead boxes visually
+// --- Ceiling freeze: bullish close above ceiling top stops the zone at that bar
+// --- Floor freeze: bearish close below floor bottom stops the zone at that bar
 if i_active_module == "M2: Order Block + SMA"
-    if array.size(s2_bob_alive) > 0
-        for i = 0 to array.size(s2_bob_alive) - 1
-            if array.get(s2_bob_alive, i) and close > array.get(s2_bob_top, i)
-                array.set(s2_bob_alive, i, false)
-                if i < array.size(s2_bob_boxes)
-                    box.set_bgcolor(array.get(s2_bob_boxes, i), color.new(color.gray, 92))
-                    box.set_border_color(array.get(s2_bob_boxes, i), color.new(color.gray, 70))
-                if i < array.size(s2_bob_lines)
-                    line.set_color(array.get(s2_bob_lines, i), color.new(color.gray, 70))
-    if array.size(s2_buob_alive) > 0
-        for i = 0 to array.size(s2_buob_alive) - 1
-            if array.get(s2_buob_alive, i) and close < array.get(s2_buob_bot, i)
-                array.set(s2_buob_alive, i, false)
-                if i < array.size(s2_buob_boxes)
-                    box.set_bgcolor(array.get(s2_buob_boxes, i), color.new(color.gray, 92))
-                    box.set_border_color(array.get(s2_buob_boxes, i), color.new(color.gray, 70))
-                if i < array.size(s2_buob_lines)
-                    line.set_color(array.get(s2_buob_lines, i), color.new(color.gray, 70))
+    if array.size(s2_ceil_alive) > 0
+        for i = 0 to array.size(s2_ceil_alive) - 1
+            if array.get(s2_ceil_alive, i) and close > open and close > array.get(s2_ceil_top, i)
+                array.set(s2_ceil_alive, i, false)
+                if i < array.size(s2_ceil_boxes)
+                    box.set_right(array.get(s2_ceil_boxes, i), bar_index)
+                if i < array.size(s2_ceil_lines)
+                    line.set_x2(array.get(s2_ceil_lines, i), bar_index)
+    if array.size(s2_floor_alive) > 0
+        for i = 0 to array.size(s2_floor_alive) - 1
+            if array.get(s2_floor_alive, i) and close < open and close < array.get(s2_floor_bot, i)
+                array.set(s2_floor_alive, i, false)
+                if i < array.size(s2_floor_boxes)
+                    box.set_right(array.get(s2_floor_boxes, i), bar_index)
+                if i < array.size(s2_floor_lines)
+                    line.set_x2(array.get(s2_floor_lines, i), bar_index)
 
-// --- Entry signal detection (retest of OB zone with confirmation)
-s2_in_bob       = false
-s2_in_buob      = false
-var int s2_bob_hit_idx  = -1
-var int s2_buob_hit_idx = -1
-s2_bob_hit_idx  := -1
-s2_buob_hit_idx := -1
-
+// --- Zone extension: alive zones extend to current bar on every tick
 if i_active_module == "M2: Order Block + SMA"
-    // Bearish OB hit = short setup
-    // Selection: among all valid hits, prefer OB whose zone bottom is closest to price (most relevant resistance)
-    _bob_best_dist = 1e10
-    if array.size(s2_bob_alive) > 0
-        for i = 0 to array.size(s2_bob_alive) - 1
-            // Gate 1: zone must still be alive
-            // Gate 2: signal must be on a bar AFTER the OB was created (no entry on impulse bar itself)
-            if array.get(s2_bob_alive, i) and i < array.size(s2_bob_created) and array.get(s2_bob_created, i) < bar_index
-                _zt  = array.get(s2_bob_top, i)
-                _zb  = array.get(s2_bob_bot, i)
-                // Wick Touch: bar range must fully intersect zone (high enters zone bottom, bar doesn't close above zone)
-                // Rejection Bar: wick enters zone AND close is in lower half AND inside or below zone top
-                // Close Inside: close is within zone body
-                // Confirm Close: bearish close with overlap
-                _hit = i_s2_confirm == "Wick Touch"    ? high >= _zb and low < _zt and close < _zt :
-                       i_s2_confirm == "Close Inside"  ? close >= _zb and close <= _zt :
-                       i_s2_confirm == "Rejection Bar" ? high >= _zb and low < _zt and close < (high + low) / 2 and close <= _zt :
-                       close < open and close <= _zt and high >= _zb and low < _zt
-                if _hit and s2_bear_trend and s2_bear_slope
-                    // Select closest OB to price: smallest (zone_bot - close) distance, zone_bot above close
-                    _dist = math.abs(_zb - close)
-                    if _dist < _bob_best_dist
-                        _bob_best_dist  := _dist
-                        s2_in_bob       := true
-                        s2_bob_hit_idx  := i
-    // Bullish OB hit = long setup
-    // Selection: prefer OB whose zone top is closest to price (most relevant support)
-    _buob_best_dist = 1e10
-    if array.size(s2_buob_alive) > 0
-        for i = 0 to array.size(s2_buob_alive) - 1
-            if array.get(s2_buob_alive, i) and i < array.size(s2_buob_created) and array.get(s2_buob_created, i) < bar_index
-                _zt  = array.get(s2_buob_top, i)
-                _zb  = array.get(s2_buob_bot, i)
-                // Wick Touch: bar range intersects zone, close does not break below zone bottom
-                _hit = i_s2_confirm == "Wick Touch"    ? low <= _zt and high > _zb and close > _zb :
-                       i_s2_confirm == "Close Inside"  ? close >= _zb and close <= _zt :
-                       i_s2_confirm == "Rejection Bar" ? low <= _zt and high > _zb and close > (high + low) / 2 and close >= _zb :
-                       close > open and close >= _zb and low <= _zt and high > _zb
-                if _hit and s2_bull_trend and s2_bull_slope
-                    _dist = math.abs(_zt - close)
-                    if _dist < _buob_best_dist
-                        _buob_best_dist  := _dist
-                        s2_in_buob       := true
-                        s2_buob_hit_idx  := i
+    if array.size(s2_ceil_alive) > 0
+        for i = 0 to array.size(s2_ceil_alive) - 1
+            if array.get(s2_ceil_alive, i)
+                box.set_right(array.get(s2_ceil_boxes, i), bar_index + 5000)
+                if i_s2_show_mid and i < array.size(s2_ceil_lines)
+                    line.set_x2(array.get(s2_ceil_lines, i), bar_index + 5000)
+    if array.size(s2_floor_alive) > 0
+        for i = 0 to array.size(s2_floor_alive) - 1
+            if array.get(s2_floor_alive, i)
+                box.set_right(array.get(s2_floor_boxes, i), bar_index + 5000)
+                if i_s2_show_mid and i < array.size(s2_floor_lines)
+                    line.set_x2(array.get(s2_floor_lines, i), bar_index + 5000)
 
-s2_sig_long  = i_s2_longs  and s2_in_buob and not s2_in_range
-s2_sig_short = i_s2_shorts and s2_in_bob  and not s2_in_range
-
-// --- OB Zone Extension (per bar: extend active OB boxes and SR lines)
-if i_active_module == "M2: Order Block + SMA"
-    if array.size(s2_bob_alive) > 0
-        for i = 0 to array.size(s2_bob_alive) - 1
-            if array.get(s2_bob_alive, i)
-                box.set_right(array.get(s2_bob_boxes, i), bar_index + i_s2_extend)
-                if i_s2_show_sr and i < array.size(s2_bob_lines)
-                    line.set_x2(array.get(s2_bob_lines, i), bar_index + i_s2_extend)
-    if array.size(s2_buob_alive) > 0
-        for i = 0 to array.size(s2_buob_alive) - 1
-            if array.get(s2_buob_alive, i)
-                box.set_right(array.get(s2_buob_boxes, i), bar_index + i_s2_extend)
-                if i_s2_show_sr and i < array.size(s2_buob_lines)
-                    line.set_x2(array.get(s2_buob_lines, i), bar_index + i_s2_extend)
+// --- No entry signals (visual-only phase)
+s2_sig_long  = false
+s2_sig_short = false
 
 // ================================================================
 // === SIGNAL AGGREGATION
@@ -633,17 +518,12 @@ final_sig_short = _raw_short and not _raw_long
 // === SHARED - Trade Execution
 // ================================================================
 
-// M2: SL anchored to OB zone boundary + buffer; TP from zone-based RR
 // M1: SL/TP from ATR-based shared Risk parameters
-_m2_l_sl  = _use_s2 and s2_buob_hit_idx >= 0 and s2_buob_hit_idx < array.size(s2_buob_bot) ?
-     array.get(s2_buob_bot, s2_buob_hit_idx) - i_s2_sl_buf * atr14 : na
-_m2_s_sl  = _use_s2 and s2_bob_hit_idx  >= 0 and s2_bob_hit_idx  < array.size(s2_bob_top)  ?
-     array.get(s2_bob_top,  s2_bob_hit_idx)  + i_s2_sl_buf * atr14 : na
-
-long_sl   = not na(_m2_l_sl) ? _m2_l_sl  : close - sl_dist
-short_sl  = not na(_m2_s_sl) ? _m2_s_sl  : close + sl_dist
-long_tp   = not na(_m2_l_sl) ? close + (close - long_sl) * i_s2_rr  : close + tp_dist
-short_tp  = not na(_m2_s_sl) ? close - (short_sl - close) * i_s2_rr : close - tp_dist
+// M2: no active signals yet (visual-only phase)
+long_sl  = close - sl_dist
+short_sl = close + sl_dist
+long_tp  = close + tp_dist
+short_tp = close - tp_dist
 
 // Risk-based position size: computed from actual SL distance per module
 // M1 uses ATR-based SL; M2 uses zone-anchored SL - each has different distance
@@ -665,12 +545,6 @@ if final_sig_long
         array.set(s1_dz_uses, s1_dz_hit_idx, _u)
         if _u >= i_s1_max_uses
             array.set(s1_dz_alive, s1_dz_hit_idx, false)
-    // M2: increment bullish OB use count
-    if _use_s2 and s2_buob_hit_idx >= 0 and s2_buob_hit_idx < array.size(s2_buob_uses)
-        _u = array.get(s2_buob_uses, s2_buob_hit_idx) + 1
-        array.set(s2_buob_uses, s2_buob_hit_idx, _u)
-        if _u >= i_s2_max_uses
-            array.set(s2_buob_alive, s2_buob_hit_idx, false)
 
 if final_sig_short
     strategy.entry("Short", strategy.short, qty=_qty_short, comment="SELL NOW")
@@ -683,12 +557,6 @@ if final_sig_short
         array.set(s1_sz_uses, s1_sz_hit_idx, _u)
         if _u >= i_s1_max_uses
             array.set(s1_sz_alive, s1_sz_hit_idx, false)
-    // M2: increment bearish OB use count
-    if _use_s2 and s2_bob_hit_idx >= 0 and s2_bob_hit_idx < array.size(s2_bob_uses)
-        _u = array.get(s2_bob_uses, s2_bob_hit_idx) + 1
-        array.set(s2_bob_uses, s2_bob_hit_idx, _u)
-        if _u >= i_s2_max_uses
-            array.set(s2_bob_alive, s2_bob_hit_idx, false)
 
 if strategy.position_size > 0
     if i_use_trail
@@ -809,7 +677,7 @@ if i_show_rr and _v_in_trade and _v_cur >= 0 and strategy.position_size != 0
     _qty_live = math.abs(strategy.position_size)
     _open_pnl = _dir_c == "long" ? (close - _ep_c) * _qty_live : (_ep_c - close) * _qty_live
     _is_pos   = _open_pnl >= 0
-    _disp_rr  = _use_s2 ? i_s2_rr : eff_rr_v
+    _disp_rr  = eff_rr_v
     _ctr_txt  = "PyG Apertura: " + (_is_pos ? "+" : "") + str.tostring(_open_pnl, "#.##") + "  Qty: " + str.tostring(_qty_live, "#.###") + "\nR/R: " + str.tostring(_disp_rr, "#.#")
 
     _x = bar_index + 2
@@ -838,7 +706,7 @@ if i_show_rr and _v_in_trade and _v_cur >= 0 and bar_index > _v_entry_bar and st
         pnl    = strategy.closedtrades.profit(n - 1)
         qty    = math.abs(strategy.closedtrades.size(n - 1))
         is_win = pnl > 0
-        _disp_rr2 = _use_s2 ? i_s2_rr : eff_rr_v
+        _disp_rr2 = eff_rr_v
         res_txt = "PyG Cerrado: " + (is_win ? "+" : "") + str.tostring(pnl, "#.##") + "  Qty: " + str.tostring(qty, "#.###") + "\nR/R: " + str.tostring(_disp_rr2, "#.#")
         label.set_text(array.get(_v_ctrlbls, _v_cur), res_txt)
         label.set_color(array.get(_v_ctrlbls, _v_cur), is_win ? color.new(color.teal, 10) : color.new(color.red, 10))
@@ -860,40 +728,6 @@ if i_debug and barstate.islast
          " | in_demand=" + str.tostring(s1_in_demand)
     label.new(bar_index, high + atr14 * 3, dbg_txt,
          style=label.style_label_down, color=color.new(color.gray, 30),
-         textcolor=color.white, size=size.tiny)
-
-// M2-specific debug: OB state, filters, SL/TP
-if i_debug and _use_s2 and barstate.islast
-    _bob_n  = array.size(s2_bob_alive)
-    _buob_n = array.size(s2_buob_alive)
-    _bob_alive_cnt  = 0
-    _buob_alive_cnt = 0
-    if _bob_n > 0
-        for i = 0 to _bob_n - 1
-            if array.get(s2_bob_alive, i)
-                _bob_alive_cnt := _bob_alive_cnt + 1
-    if _buob_n > 0
-        for i = 0 to _buob_n - 1
-            if array.get(s2_buob_alive, i)
-                _buob_alive_cnt := _buob_alive_cnt + 1
-    _m2_sl_disp = s2_buob_hit_idx >= 0 and s2_buob_hit_idx < array.size(s2_buob_bot) ?
-         array.get(s2_buob_bot, s2_buob_hit_idx) - i_s2_sl_buf * atr14 : na
-    _m2_tp_disp = not na(_m2_sl_disp) ? close + (close - _m2_sl_disp) * i_s2_rr : na
-    _m2dbg = "[M2 DEBUG]" +
-         "\nBearish OBs: total=" + str.tostring(_bob_n) + " alive=" + str.tostring(_bob_alive_cnt) +
-         "\nBullish OBs: total=" + str.tostring(_buob_n) + " alive=" + str.tostring(_buob_alive_cnt) +
-         "\nHit bearish OB idx=" + str.tostring(s2_bob_hit_idx) +
-         " | Hit bullish OB idx=" + str.tostring(s2_buob_hit_idx) +
-         "\nRetest valid: bob=" + str.tostring(s2_in_bob) + " buob=" + str.tostring(s2_in_buob) +
-         "\nSMA filter: bull=" + str.tostring(s2_bull_trend) + " bear=" + str.tostring(s2_bear_trend) +
-         "\nSlope filter: bull=" + str.tostring(s2_bull_slope) + " bear=" + str.tostring(s2_bear_slope) +
-         "\nRange blocked=" + str.tostring(s2_in_range) +
-         " | ATR ratio=" + str.tostring(s2_atr_avg > 0 ? atr14 / s2_atr_avg : 1.0, "#.##") +
-         "\nEntry~=" + str.tostring(close, format.mintick) +
-         " | SL=" + (not na(_m2_sl_disp) ? str.tostring(_m2_sl_disp, format.mintick) : "n/a") +
-         " | TP=" + (not na(_m2_tp_disp) ? str.tostring(_m2_tp_disp, format.mintick) : "n/a")
-    label.new(bar_index, high + atr14 * 6, _m2dbg,
-         style=label.style_label_down, color=color.new(color.blue, 20),
          textcolor=color.white, size=size.tiny)
 
 // ================================================================
