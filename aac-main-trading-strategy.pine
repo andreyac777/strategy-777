@@ -121,7 +121,7 @@ i_s1_zone_atr  = input.float(0.5, "Zone Width (ATR mult)", minval=0.1, step=0.05
 i_s1_extend    = input.int(100, "Zone Extension (bars right)", minval=10, group=g_s1)
 i_s1_max_zones = input.int(3, "Max Active Zones per Side", minval=1, maxval=5, group=g_s1)
 i_s1_inval     = input.bool(true, "Invalidate on Body Close-Through", group=g_s1)
-i_s1_touch     = input.string("Wick Touch", "Entry Trigger", options=["Wick Touch","Body Close Inside"], group=g_s1)
+i_s1_touch     = input.string("Rejection Bar", "Entry Trigger", options=["Wick Touch","Rejection Bar","Body Close Inside"], group=g_s1)
 i_s1_longs     = input.bool(true, "Enable Longs", group=g_s1)
 i_s1_shorts    = input.bool(true, "Enable Shorts", group=g_s1)
 i_s1_transp_z  = input.int(82, "Zone Transparency", minval=50, maxval=95, group=g_s1)
@@ -187,7 +187,7 @@ if i_s1_enable
             if array.get(s1_sz_alive, i)
                 zt = array.get(s1_sz_top, i)
                 zb = array.get(s1_sz_bot, i)
-                _hit = i_s1_touch == "Wick Touch" ? (high >= zb and low <= zt) : (close >= zb and close <= zt)
+                _hit = i_s1_touch == "Wick Touch" ? (high >= zb and low <= zt) : i_s1_touch == "Rejection Bar" ? (high >= zb and close < (high + low) / 2 and close <= zt) : (close >= zb and close <= zt)
                 s1_in_supply := s1_in_supply or _hit
 
     if array.size(s1_dz_alive) > 0
@@ -195,7 +195,7 @@ if i_s1_enable
             if array.get(s1_dz_alive, i)
                 zt = array.get(s1_dz_top, i)
                 zb = array.get(s1_dz_bot, i)
-                _hit = i_s1_touch == "Wick Touch" ? (high >= zb and low <= zt) : (close >= zb and close <= zt)
+                _hit = i_s1_touch == "Wick Touch" ? (high >= zb and low <= zt) : i_s1_touch == "Rejection Bar" ? (low <= zt and close > (high + low) / 2 and close >= zb) : (close >= zb and close <= zt)
                 s1_in_demand := s1_in_demand or _hit
 
 s1_sig_long  = i_s1_enable and i_s1_longs  and s1_in_demand
@@ -306,96 +306,101 @@ if i_show_labels
              textcolor=color.white, size=size.normal)
 
 // ----------------------------------------------------------------
-// R/R Trade Boxes
-// Spec: two-zone box (TP teal / SL red) + central result label
-// Ref : skills/08_estilo_visual_entradas_salidas.md
+// R/R Trade Visual - extending lines + boxes
+// Lines grow right bar by bar. Boxes expand as trade progresses.
+// Ref: skills/08_estilo_visual_entradas_salidas.md
 // ----------------------------------------------------------------
 
-var float  _e_price = na
-var float  _e_sl    = na
-var float  _e_tp    = na
-var int    _e_bar   = na
-var string _e_dir   = ""
-var box    _tp_box  = na
-var box    _sl_box  = na
-var label  _tp_lbl  = na
-var label  _sl_lbl  = na
-var label  _rr_lbl  = na
+var line   _v_eline  = na
+var line   _v_sline  = na
+var line   _v_tline  = na
+var box    _v_tpbox  = na
+var box    _v_slbox  = na
+var label  _v_tplbl  = na
+var label  _v_sllbl  = na
+var label  _v_ctrlbl = na
+var float  _v_ep     = na
+var float  _v_sl     = na
+var float  _v_tp     = na
+var int    _v_ebar   = na
+var string _v_dir    = ""
 
-if final_sig_long and i_show_rr
-    _e_price := close
-    _e_sl    := long_sl
-    _e_tp    := long_tp
-    _e_bar   := bar_index
-    _e_dir   := "long"
+// On entry signal: create visual objects
+if i_show_rr and (final_sig_long or final_sig_short)
+    line.delete(_v_eline)
+    line.delete(_v_sline)
+    line.delete(_v_tline)
+    box.delete(_v_tpbox)
+    box.delete(_v_slbox)
+    label.delete(_v_tplbl)
+    label.delete(_v_sllbl)
+    label.delete(_v_ctrlbl)
 
-if final_sig_short and i_show_rr
-    _e_price := close
-    _e_sl    := short_sl
-    _e_tp    := short_tp
-    _e_bar   := bar_index
-    _e_dir   := "short"
+    _v_ep   := close
+    _v_sl   := final_sig_long ? long_sl : short_sl
+    _v_tp   := final_sig_long ? long_tp : short_tp
+    _v_dir  := final_sig_long ? "long" : "short"
+    _v_ebar := bar_index
 
-// Redraw boxes and labels on every bar while in trade
-if i_show_rr and not na(_e_price) and strategy.position_size != 0
-    box.delete(_tp_box)
-    box.delete(_sl_box)
-    label.delete(_tp_lbl)
-    label.delete(_sl_lbl)
-    label.delete(_rr_lbl)
+    _c_tp = color.new(color.teal, i_transp_box)
+    _c_sl = color.new(color.red,  i_transp_box)
+    _bx   = bar_index
 
-    qty      = math.abs(strategy.position_size)
-    tp_dist_ = math.abs(_e_tp - _e_price)
-    sl_dist_ = math.abs(_e_price - _e_sl)
-    tp_pct   = str.tostring(tp_dist_ / _e_price * 100, "#.###") + "%"
-    sl_pct   = str.tostring(sl_dist_ / _e_price * 100, "#.###") + "%"
-    tp_val   = str.tostring(tp_dist_ * qty, "#.##")
-    sl_val   = str.tostring(sl_dist_ * qty, "#.##")
-    open_pnl = _e_dir == "long" ? (close - _e_price) * qty : (_e_price - close) * qty
-    is_pos   = open_pnl >= 0
+    _v_eline := line.new(_bx, _v_ep, _bx, _v_ep, color=color.new(color.white, 30), width=1, style=line.style_dashed)
+    _v_sline := line.new(_bx, _v_sl, _bx, _v_sl, color=color.new(color.red,   20), width=1, style=line.style_dashed)
+    _v_tline := line.new(_bx, _v_tp, _bx, _v_tp, color=color.new(color.teal,  20), width=1, style=line.style_dashed)
 
-    c_tp  = color.new(color.teal, i_transp_box)
-    c_sl  = color.new(color.red,  i_transp_box)
-    x_lbl = bar_index + 2
+    _tp_pct = str.tostring(math.abs(_v_tp - _v_ep) / _v_ep * 100, "#.###") + "%"
+    _sl_pct = str.tostring(math.abs(_v_ep - _v_sl) / _v_ep * 100, "#.###") + "%"
+    _tp_amt = str.tostring(math.abs(_v_tp - _v_ep) * _qty, "#.##")
+    _sl_amt = str.tostring(math.abs(_v_ep - _v_sl) * _qty, "#.##")
+    _tp_txt = "TP: " + str.tostring(_v_tp, format.mintick) + " (" + _tp_pct + ")  $" + _tp_amt
+    _sl_txt = "SL: " + str.tostring(_v_sl, format.mintick) + " (" + _sl_pct + ")  $" + _sl_amt
 
-    tp_lbl_txt = "Objetivo: " + str.tostring(_e_tp, format.mintick) + " (" + tp_pct + ") " + str.tostring(_e_tp, format.mintick) + ", Importe: " + tp_val
-    sl_lbl_txt = "Stop: "     + str.tostring(_e_sl, format.mintick) + " (" + sl_pct + ") " + str.tostring(_e_sl, format.mintick) + ", Importe: " + sl_val
-    ctr_txt    = "PyG Apertura: " + str.tostring(open_pnl, "#.##") + ", Cantidad: " + str.tostring(qty, "#.#####") + "\nratio riesgo/beneficio: " + str.tostring(i_rr, "#.#")
-
-    if _e_dir == "long"
-        _tp_box := box.new(_e_bar, _e_tp,    bar_index + 1, _e_price,
-             bgcolor=c_tp, border_color=color.new(color.teal, 30), border_width=1)
-        _sl_box := box.new(_e_bar, _e_price, bar_index + 1, _e_sl,
-             bgcolor=c_sl, border_color=color.new(color.red,  30), border_width=1)
-        _tp_lbl := label.new(x_lbl, _e_tp,    tp_lbl_txt, style=label.style_label_lower_left, color=color.new(color.teal, 10), textcolor=color.white, size=size.small)
-        _sl_lbl := label.new(x_lbl, _e_sl,    sl_lbl_txt, style=label.style_label_upper_left, color=color.new(color.red,  10), textcolor=color.white, size=size.small)
+    if _v_dir == "long"
+        _v_tpbox := box.new(_bx, _v_tp, _bx + 1, _v_ep, bgcolor=_c_tp, border_color=color.new(color.teal, 30), border_width=1)
+        _v_slbox := box.new(_bx, _v_ep, _bx + 1, _v_sl, bgcolor=_c_sl, border_color=color.new(color.red,  30), border_width=1)
+        _v_tplbl := label.new(_bx + 2, _v_tp, _tp_txt, style=label.style_label_lower_left, color=color.new(color.teal, 10), textcolor=color.white, size=size.small)
+        _v_sllbl := label.new(_bx + 2, _v_sl, _sl_txt, style=label.style_label_upper_left, color=color.new(color.red,  10), textcolor=color.white, size=size.small)
     else
-        _tp_box := box.new(_e_bar, _e_price, bar_index + 1, _e_tp,
-             bgcolor=c_tp, border_color=color.new(color.teal, 30), border_width=1)
-        _sl_box := box.new(_e_bar, _e_sl,    bar_index + 1, _e_price,
-             bgcolor=c_sl, border_color=color.new(color.red,  30), border_width=1)
-        _tp_lbl := label.new(x_lbl, _e_tp,    tp_lbl_txt, style=label.style_label_upper_left, color=color.new(color.teal, 10), textcolor=color.white, size=size.small)
-        _sl_lbl := label.new(x_lbl, _e_sl,    sl_lbl_txt, style=label.style_label_lower_left, color=color.new(color.red,  10), textcolor=color.white, size=size.small)
+        _v_tpbox := box.new(_bx, _v_ep, _bx + 1, _v_tp, bgcolor=_c_tp, border_color=color.new(color.teal, 30), border_width=1)
+        _v_slbox := box.new(_bx, _v_sl, _bx + 1, _v_ep, bgcolor=_c_sl, border_color=color.new(color.red,  30), border_width=1)
+        _v_tplbl := label.new(_bx + 2, _v_tp, _tp_txt, style=label.style_label_upper_left, color=color.new(color.teal, 10), textcolor=color.white, size=size.small)
+        _v_sllbl := label.new(_bx + 2, _v_sl, _sl_txt, style=label.style_label_lower_left, color=color.new(color.red,  10), textcolor=color.white, size=size.small)
 
-    _rr_lbl := label.new(x_lbl, (_e_tp + _e_sl) / 2, ctr_txt,
-         style=label.style_label_left,
-         color=is_pos ? color.new(color.teal, 15) : color.new(color.red, 15),
-         textcolor=color.white, size=size.small)
+    _v_ctrlbl := label.new(_bx + 2, (_v_tp + _v_sl) / 2, "PyG Apertura: 0.00", style=label.style_label_left, color=color.new(color.gray, 30), textcolor=color.white, size=size.small)
 
-// Finalize labels on trade close
-if i_show_rr and strategy.position_size == 0 and not na(_e_price)
+// Extend lines + boxes each bar; update live P&L
+if i_show_rr and strategy.position_size != 0 and not na(_v_ebar)
+    line.set_x2(_v_eline, bar_index)
+    line.set_x2(_v_sline, bar_index)
+    line.set_x2(_v_tline, bar_index)
+    box.set_right(_v_tpbox, bar_index + 1)
+    box.set_right(_v_slbox, bar_index + 1)
+
+    _qty_live = math.abs(strategy.position_size)
+    _open_pnl = _v_dir == "long" ? (close - _v_ep) * _qty_live : (_v_ep - close) * _qty_live
+    _is_pos   = _open_pnl >= 0
+    _ctr_txt  = "PyG Apertura: " + (_is_pos ? "+" : "") + str.tostring(_open_pnl, "#.##") + "  Qty: " + str.tostring(_qty_live, "#.###") + "\nR/R: " + str.tostring(i_rr, "#.#")
+
+    _x = bar_index + 2
+    label.set_xy(_v_tplbl,  _x, _v_tp)
+    label.set_xy(_v_sllbl,  _x, _v_sl)
+    label.set_xy(_v_ctrlbl, _x, (_v_tp + _v_sl) / 2)
+    label.set_text(_v_ctrlbl, _ctr_txt)
+    label.set_color(_v_ctrlbl, _is_pos ? color.new(color.teal, 15) : color.new(color.red, 15))
+
+// On trade close: stamp final result
+if i_show_rr and strategy.position_size == 0 and not na(_v_ebar)
     n = strategy.closedtrades
     if n > 0
         pnl    = strategy.closedtrades.profit(n - 1)
         qty    = math.abs(strategy.closedtrades.size(n - 1))
         is_win = pnl > 0
-        res_txt = "PyG Cerrado: " + (is_win ? "+" : "") + str.tostring(pnl, "#.##") + ", Cantidad: " + str.tostring(qty, "#.#####") + "\nratio riesgo/beneficio: " + str.tostring(i_rr, "#.#")
-        label.delete(_rr_lbl)
-        _rr_lbl := label.new(bar_index, (_e_tp + _e_sl) / 2, res_txt,
-             style=label.style_label_left,
-             color=is_win ? color.new(color.teal, 10) : color.new(color.red, 10),
-             textcolor=color.white, size=size.small)
-    _e_price := na
+        res_txt = "PyG Cerrado: " + (is_win ? "+" : "") + str.tostring(pnl, "#.##") + "  Qty: " + str.tostring(qty, "#.###") + "\nR/R: " + str.tostring(i_rr, "#.#")
+        label.set_text(_v_ctrlbl, res_txt)
+        label.set_color(_v_ctrlbl, is_win ? color.new(color.teal, 10) : color.new(color.red, 10))
+    _v_ebar := na
 
 // ================================================================
 // === SHARED - Debug Output
@@ -458,7 +463,7 @@ if i_show_table and na(_atbl)
     r0_zatr = _tf0 == "1" ? 0.3 : _tf0 == "3" ? 0.35 : _tf0 == "5" ? 0.4 : _tf0 == "15" ? 0.5 : _tf0 == "30" ? 0.6 : _tf0 == "60" ? 0.7 : _tf0 == "240" ? 0.8 : 0.5
     r0_sl   = _tf0 == "1" ? 1.0 : _tf0 == "3" ? 1.0 : _tf0 == "5" ? 1.2 : _tf0 == "15" ? 1.5 : _tf0 == "30" ? 1.8 : _tf0 == "60" ? 2.0 : _tf0 == "240" ? 2.5 : 1.5
     r0_rr   = _tf0 == "1" ? 1.5 : _tf0 == "3" ? 1.5 : _tf0 == "5" ? 1.8 : _tf0 == "15" ? 2.0 : _tf0 == "30" ? 2.0 : _tf0 == "60" ? 2.5 : _tf0 == "240" ? 2.5 : 2.0
-    r0_tch  = (_tf0 == "1" or _tf0 == "3" or _tf0 == "5") ? "Body" : "Wick"
+    r0_tch  = (_tf0 == "1" or _tf0 == "3" or _tf0 == "5") ? "Reject" : "Wick"
 
     _atbl := table.new(position.bottom_right, 3, 18, border_width=1,
          border_color=color.new(color.gray, 60), frame_width=1,
@@ -534,7 +539,7 @@ if i_show_table and barstate.isconfirmed and not na(_atbl)
     r_zatr  = _tf == "1" ? 0.3 : _tf == "3" ? 0.35 : _tf == "5" ? 0.4 : _tf == "15" ? 0.5 : _tf == "30" ? 0.6 : _tf == "60" ? 0.7 : _tf == "240" ? 0.8 : 0.5
     r_sl    = _tf == "1" ? 1.0 : _tf == "3" ? 1.0 : _tf == "5" ? 1.2 : _tf == "15" ? 1.5 : _tf == "30" ? 1.8 : _tf == "60" ? 2.0 : _tf == "240" ? 2.5 : 1.5
     r_rr    = _tf == "1" ? 1.5 : _tf == "3" ? 1.5 : _tf == "5" ? 1.8 : _tf == "15" ? 2.0 : _tf == "30" ? 2.0 : _tf == "60" ? 2.5 : _tf == "240" ? 2.5 : 2.0
-    r_tch   = (_tf == "1" or _tf == "3" or _tf == "5") ? "Body Close Inside" : "Wick Touch"
+    r_tch   = (_tf == "1" or _tf == "3" or _tf == "5") ? "Rejection Bar" : "Wick Touch"
 
     m_piv   = i_s1_pivot_l == r_piv and i_s1_pivot_r == r_piv
     m_zatr  = math.abs(i_s1_zone_atr - r_zatr) < 0.05
@@ -561,7 +566,7 @@ if i_show_table and barstate.isconfirmed and not na(_atbl)
     table.cell(_atbl, 2, 8, _swr >= 55 ? "GOOD" : _swr >= 50 ? "OK" : "LOW", bgcolor=C_BG, text_color=_swr >= 55 ? C_GRN : _swr >= 50 ? C_ORG : C_RED, text_size=size.tiny, text_halign=text.align_center)
 
     // Recommendations current cols
-    _cur_tch = i_s1_touch == "Wick Touch" ? "Wick" : "Body"
+    _cur_tch = i_s1_touch == "Wick Touch" ? "Wick" : i_s1_touch == "Rejection Bar" ? "Reject" : "Body"
     table.cell(_atbl, 1, 10, str.tostring(i_s1_pivot_l) + "/" + str.tostring(i_s1_pivot_r), bgcolor=C_BG, text_color=m_piv ? C_GRN : C_ORG, text_size=size.tiny, text_halign=text.align_center)
     table.cell(_atbl, 1, 11, str.tostring(i_s1_zone_atr, "#.##"), bgcolor=C_BG, text_color=m_zatr ? C_GRN : C_ORG, text_size=size.tiny, text_halign=text.align_center)
     table.cell(_atbl, 1, 12, str.tostring(i_sl_mult, "#.#"), bgcolor=C_BG, text_color=m_sl ? C_GRN : C_ORG, text_size=size.tiny, text_halign=text.align_center)
