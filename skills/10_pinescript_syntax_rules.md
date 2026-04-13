@@ -148,11 +148,45 @@ if array.size(mi_array) > 0
 
 ---
 
+---
+
+## REGLA 7 — Al renombrar una variable, actualizar TODAS sus referencias en el archivo
+
+Pine Script declara variables en orden de ejecucion top-to-bottom. Si una variable se
+renombra en un bloque, todas las secciones posteriores que la usen seguiran referenciando
+el nombre anterior y lanzaran "Undeclared identifier".
+
+### Patron peligroso: split de variable por direccion
+Cuando se divide `_qty` en `_qty_long` y `_qty_short`, la seccion visual que usaba
+`_qty` sigue esperando el nombre original.
+
+### Correcto: resolver localmente en el scope que lo necesita
+```pine
+// Seccion de ejecucion (global)
+_qty_long  = math.max(_risk_usd / (_sl_dist_long  * _pv), syminfo.mintick)
+_qty_short = math.max(_risk_usd / (_sl_dist_short * _pv), syminfo.mintick)
+
+// Seccion visual (bloque local if)
+if i_show_rr and (final_sig_long or final_sig_short)
+    _qty = final_sig_long ? _qty_long : _qty_short  // resuelto aqui, no en global
+    _tp_amt = str.tostring(math.abs(_tp - _ep) * _qty, "#.##")
+```
+
+### Checklist al renombrar variables
+- [ ] Buscar TODAS las ocurrencias con grep: `grep -n "_nombre_viejo" archivo.pine`
+- [ ] Verificar secciones visuales (R/R boxes, labels, debug)
+- [ ] Verificar seccion de debug labels
+- [ ] Verificar seccion de tabla analyzer
+- [ ] No asumir que solo la seccion editada usa la variable
+
+---
+
 ## Referencia de errores comunes
 
 | Error | Causa probable |
 |---|---|
 | `Mismatched input 'end of line without line continuation'` | strategy() con ( solo en su linea, o caracter non-ASCII en el archivo |
+| `Undeclared identifier '_nombre'` | Variable renombrada o refactorizada pero referencia antigua quedo en otra seccion del archivo |
 | `Undeclared identifier` | Variable usada antes de ser declarada |
 | `Cannot call 'strategy.entry' in local scope` | strategy.entry() dentro de una funcion |
 | `Loop is too long` | for loop iterando demasiados elementos en tiempo real |
