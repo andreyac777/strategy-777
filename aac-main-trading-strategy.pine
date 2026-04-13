@@ -73,8 +73,9 @@ i_transp_box  = input.int(75, "Trade Box Transparency", minval=50, maxval=95, gr
 // ================================================================
 // === SHARED - Analyzer Table
 // ================================================================
-var g_tbl    = "Analyzer"
-i_show_table = input.bool(true,  "Show Strategy Analyzer Table", group=g_tbl)
+var g_tbl      = "Analyzer"
+i_show_table   = input.bool(true,  "Show Strategy Analyzer Table", group=g_tbl)
+i_auto_suggest = input.bool(false, "Auto-Suggest: Apply Recommended Values", group=g_tbl)
 
 // ================================================================
 // === SHARED - Debug
@@ -104,8 +105,19 @@ in_session     = i_filter_sess ? not na(time(timeframe.period, i_session, i_tz))
 trend_ok_long  = not i_use_trend or bull_bias
 trend_ok_short = not i_use_trend or bear_bias
 no_position    = strategy.position_size == 0
-sl_dist        = atr14 * i_sl_mult
-tp_dist        = sl_dist * i_rr
+
+// Auto-suggest: TF-based recommended values (applied when i_auto_suggest is ON)
+_as_tf   = timeframe.period
+_as_piv  = _as_tf == "1" ? 3 : _as_tf == "3" ? 3 : _as_tf == "5" ? 4 : _as_tf == "15" ? 5 : _as_tf == "30" ? 6 : _as_tf == "60" ? 7 : _as_tf == "240" ? 8 : 5
+_as_zatr = _as_tf == "1" ? 0.3 : _as_tf == "3" ? 0.35 : _as_tf == "5" ? 0.4 : _as_tf == "15" ? 0.5 : _as_tf == "30" ? 0.6 : _as_tf == "60" ? 0.7 : _as_tf == "240" ? 0.8 : 0.5
+_as_sl   = _as_tf == "1" ? 1.0 : _as_tf == "3" ? 1.0 : _as_tf == "5" ? 1.2 : _as_tf == "15" ? 1.5 : _as_tf == "30" ? 1.8 : _as_tf == "60" ? 2.0 : _as_tf == "240" ? 2.5 : 1.5
+_as_rr   = _as_tf == "1" ? 1.5 : _as_tf == "3" ? 1.5 : _as_tf == "5" ? 1.8 : _as_tf == "15" ? 2.0 : _as_tf == "30" ? 2.0 : _as_tf == "60" ? 2.5 : _as_tf == "240" ? 2.5 : 2.0
+_as_tch  = (_as_tf == "1" or _as_tf == "3" or _as_tf == "5") ? "Rejection Bar" : "Wick Touch"
+
+eff_sl_m = i_auto_suggest ? _as_sl : i_sl_mult
+eff_rr_v = i_auto_suggest ? _as_rr : i_rr
+sl_dist  = atr14 * eff_sl_m
+tp_dist  = sl_dist * eff_rr_v
 
 // ================================================================
 // ================================================================
@@ -126,6 +138,12 @@ i_s1_longs     = input.bool(true, "Enable Longs", group=g_s1)
 i_s1_shorts    = input.bool(true, "Enable Shorts", group=g_s1)
 i_s1_transp_z  = input.int(82, "Zone Transparency", minval=50, maxval=95, group=g_s1)
 
+// Effective Module 1 parameters (override with suggested values when Auto-Suggest is ON)
+eff_pivot_l = i_auto_suggest ? _as_piv  : i_s1_pivot_l
+eff_pivot_r = i_auto_suggest ? _as_piv  : i_s1_pivot_r
+eff_zatr    = i_auto_suggest ? _as_zatr : i_s1_zone_atr
+eff_touch   = i_auto_suggest ? _as_tch  : i_s1_touch
+
 // --- Zone Arrays
 var float[] s1_sz_top   = array.new_float()
 var float[] s1_sz_bot   = array.new_float()
@@ -138,9 +156,9 @@ var int[]   s1_dz_bar   = array.new_int()
 var bool[]  s1_dz_alive = array.new_bool()
 
 // --- Pivot Detection
-s1_ph        = ta.pivothigh(high, i_s1_pivot_l, i_s1_pivot_r)
-s1_pl        = ta.pivotlow(low,   i_s1_pivot_l, i_s1_pivot_r)
-s1_zone_half = atr14 * i_s1_zone_atr * 0.5
+s1_ph        = ta.pivothigh(high, eff_pivot_l, eff_pivot_r)
+s1_pl        = ta.pivotlow(low,   eff_pivot_l, eff_pivot_r)
+s1_zone_half = atr14 * eff_zatr * 0.5
 
 // --- Register supply zone on pivot high
 if i_s1_enable and not na(s1_ph)
@@ -187,7 +205,7 @@ if i_s1_enable
             if array.get(s1_sz_alive, i)
                 zt = array.get(s1_sz_top, i)
                 zb = array.get(s1_sz_bot, i)
-                _hit = i_s1_touch == "Wick Touch" ? (high >= zb and low <= zt) : i_s1_touch == "Rejection Bar" ? (high >= zb and close < (high + low) / 2 and close <= zt) : (close >= zb and close <= zt)
+                _hit = eff_touch == "Wick Touch" ? (high >= zb and low <= zt) : eff_touch == "Rejection Bar" ? (high >= zb and close < (high + low) / 2 and close <= zt) : (close >= zb and close <= zt)
                 s1_in_supply := s1_in_supply or _hit
 
     if array.size(s1_dz_alive) > 0
@@ -195,7 +213,7 @@ if i_s1_enable
             if array.get(s1_dz_alive, i)
                 zt = array.get(s1_dz_top, i)
                 zb = array.get(s1_dz_bot, i)
-                _hit = i_s1_touch == "Wick Touch" ? (high >= zb and low <= zt) : i_s1_touch == "Rejection Bar" ? (low <= zt and close > (high + low) / 2 and close >= zb) : (close >= zb and close <= zt)
+                _hit = eff_touch == "Wick Touch" ? (high >= zb and low <= zt) : eff_touch == "Rejection Bar" ? (low <= zt and close > (high + low) / 2 and close >= zb) : (close >= zb and close <= zt)
                 s1_in_demand := s1_in_demand or _hit
 
 s1_sig_long  = i_s1_enable and i_s1_longs  and s1_in_demand
@@ -306,101 +324,118 @@ if i_show_labels
              textcolor=color.white, size=size.normal)
 
 // ----------------------------------------------------------------
-// R/R Trade Visual - extending lines + boxes
-// Lines grow right bar by bar. Boxes expand as trade progresses.
-// Ref: skills/08_estilo_visual_entradas_salidas.md
+// R/R Trade Visual - array-based, all historical boxes persist
+// Each trade pushes new objects into arrays. No deletes on entry.
+// Current trade extends right each bar; closed trades freeze.
 // ----------------------------------------------------------------
 
-var line   _v_eline  = na
-var line   _v_sline  = na
-var line   _v_tline  = na
-var box    _v_tpbox  = na
-var box    _v_slbox  = na
-var label  _v_tplbl  = na
-var label  _v_sllbl  = na
-var label  _v_ctrlbl = na
-var float  _v_ep     = na
-var float  _v_sl     = na
-var float  _v_tp     = na
-var int    _v_ebar   = na
-var string _v_dir    = ""
+var line[]   _v_elines  = array.new<line>()
+var line[]   _v_slines  = array.new<line>()
+var line[]   _v_tlines  = array.new<line>()
+var box[]    _v_tpboxes = array.new<box>()
+var box[]    _v_slboxes = array.new<box>()
+var label[]  _v_tplbls  = array.new<label>()
+var label[]  _v_sllbls  = array.new<label>()
+var label[]  _v_ctrlbls = array.new<label>()
+var float[]  _v_eps     = array.new<float>()
+var float[]  _v_sls     = array.new<float>()
+var float[]  _v_tps     = array.new<float>()
+var string[] _v_dirs    = array.new<string>()
+var bool     _v_in_trade  = false
+var int      _v_cur       = -1
+var int      _v_entry_bar = -1
 
-// On entry signal: create visual objects
+// On entry signal: push new visual objects (previous boxes stay)
 if i_show_rr and (final_sig_long or final_sig_short)
-    line.delete(_v_eline)
-    line.delete(_v_sline)
-    line.delete(_v_tline)
-    box.delete(_v_tpbox)
-    box.delete(_v_slbox)
-    label.delete(_v_tplbl)
-    label.delete(_v_sllbl)
-    label.delete(_v_ctrlbl)
-
-    _v_ep   := close
-    _v_sl   := final_sig_long ? long_sl : short_sl
-    _v_tp   := final_sig_long ? long_tp : short_tp
-    _v_dir  := final_sig_long ? "long" : "short"
-    _v_ebar := bar_index
-
+    _ep  = close
+    _sl  = final_sig_long ? long_sl : short_sl
+    _tp  = final_sig_long ? long_tp : short_tp
+    _dir = final_sig_long ? "long" : "short"
+    _bx  = bar_index
     _c_tp = color.new(color.teal, i_transp_box)
     _c_sl = color.new(color.red,  i_transp_box)
-    _bx   = bar_index
 
-    _v_eline := line.new(_bx, _v_ep, _bx, _v_ep, color=color.new(color.white, 30), width=1, style=line.style_dashed)
-    _v_sline := line.new(_bx, _v_sl, _bx, _v_sl, color=color.new(color.red,   20), width=1, style=line.style_dashed)
-    _v_tline := line.new(_bx, _v_tp, _bx, _v_tp, color=color.new(color.teal,  20), width=1, style=line.style_dashed)
+    _tp_pct = str.tostring(math.abs(_tp - _ep) / _ep * 100, "#.###") + "%"
+    _sl_pct = str.tostring(math.abs(_ep - _sl) / _ep * 100, "#.###") + "%"
+    _tp_amt = str.tostring(math.abs(_tp - _ep) * _qty, "#.##")
+    _sl_amt = str.tostring(math.abs(_ep - _sl) * _qty, "#.##")
+    _tp_txt = "TP: " + str.tostring(_tp, format.mintick) + " (" + _tp_pct + ")  $" + _tp_amt
+    _sl_txt = "SL: " + str.tostring(_sl, format.mintick) + " (" + _sl_pct + ")  $" + _sl_amt
 
-    _tp_pct = str.tostring(math.abs(_v_tp - _v_ep) / _v_ep * 100, "#.###") + "%"
-    _sl_pct = str.tostring(math.abs(_v_ep - _v_sl) / _v_ep * 100, "#.###") + "%"
-    _tp_amt = str.tostring(math.abs(_v_tp - _v_ep) * _qty, "#.##")
-    _sl_amt = str.tostring(math.abs(_v_ep - _v_sl) * _qty, "#.##")
-    _tp_txt = "TP: " + str.tostring(_v_tp, format.mintick) + " (" + _tp_pct + ")  $" + _tp_amt
-    _sl_txt = "SL: " + str.tostring(_v_sl, format.mintick) + " (" + _sl_pct + ")  $" + _sl_amt
+    _eline = line.new(_bx, _ep, _bx, _ep, color=color.new(color.white, 30), width=1, style=line.style_dashed)
+    _sline = line.new(_bx, _sl, _bx, _sl, color=color.new(color.red,   20), width=1, style=line.style_dashed)
+    _tline = line.new(_bx, _tp, _bx, _tp, color=color.new(color.teal,  20), width=1, style=line.style_dashed)
 
-    if _v_dir == "long"
-        _v_tpbox := box.new(_bx, _v_tp, _bx + 1, _v_ep, bgcolor=_c_tp, border_color=color.new(color.teal, 30), border_width=1)
-        _v_slbox := box.new(_bx, _v_ep, _bx + 1, _v_sl, bgcolor=_c_sl, border_color=color.new(color.red,  30), border_width=1)
-        _v_tplbl := label.new(_bx + 2, _v_tp, _tp_txt, style=label.style_label_lower_left, color=color.new(color.teal, 10), textcolor=color.white, size=size.small)
-        _v_sllbl := label.new(_bx + 2, _v_sl, _sl_txt, style=label.style_label_upper_left, color=color.new(color.red,  10), textcolor=color.white, size=size.small)
-    else
-        _v_tpbox := box.new(_bx, _v_ep, _bx + 1, _v_tp, bgcolor=_c_tp, border_color=color.new(color.teal, 30), border_width=1)
-        _v_slbox := box.new(_bx, _v_sl, _bx + 1, _v_ep, bgcolor=_c_sl, border_color=color.new(color.red,  30), border_width=1)
-        _v_tplbl := label.new(_bx + 2, _v_tp, _tp_txt, style=label.style_label_upper_left, color=color.new(color.teal, 10), textcolor=color.white, size=size.small)
-        _v_sllbl := label.new(_bx + 2, _v_sl, _sl_txt, style=label.style_label_lower_left, color=color.new(color.red,  10), textcolor=color.white, size=size.small)
+    _tpbox = _dir == "long" ? box.new(_bx, _tp, _bx + 1, _ep, bgcolor=_c_tp, border_color=color.new(color.teal, 30), border_width=1) : box.new(_bx, _ep, _bx + 1, _tp, bgcolor=_c_tp, border_color=color.new(color.teal, 30), border_width=1)
+    _slbox = _dir == "long" ? box.new(_bx, _ep, _bx + 1, _sl, bgcolor=_c_sl, border_color=color.new(color.red,  30), border_width=1) : box.new(_bx, _sl, _bx + 1, _ep, bgcolor=_c_sl, border_color=color.new(color.red,  30), border_width=1)
+    _tplbl = _dir == "long" ? label.new(_bx + 2, _tp, _tp_txt, style=label.style_label_lower_left, color=color.new(color.teal, 10), textcolor=color.white, size=size.small) : label.new(_bx + 2, _tp, _tp_txt, style=label.style_label_upper_left, color=color.new(color.teal, 10), textcolor=color.white, size=size.small)
+    _sllbl = _dir == "long" ? label.new(_bx + 2, _sl, _sl_txt, style=label.style_label_upper_left, color=color.new(color.red,  10), textcolor=color.white, size=size.small) : label.new(_bx + 2, _sl, _sl_txt, style=label.style_label_lower_left, color=color.new(color.red,  10), textcolor=color.white, size=size.small)
+    _ctrlbl = label.new(_bx + 2, (_tp + _sl) / 2, "PyG Apertura: 0.00", style=label.style_label_left, color=color.new(color.gray, 30), textcolor=color.white, size=size.small)
 
-    _v_ctrlbl := label.new(_bx + 2, (_v_tp + _v_sl) / 2, "PyG Apertura: 0.00", style=label.style_label_left, color=color.new(color.gray, 30), textcolor=color.white, size=size.small)
+    array.push(_v_elines,  _eline)
+    array.push(_v_slines,  _sline)
+    array.push(_v_tlines,  _tline)
+    array.push(_v_tpboxes, _tpbox)
+    array.push(_v_slboxes, _slbox)
+    array.push(_v_tplbls,  _tplbl)
+    array.push(_v_sllbls,  _sllbl)
+    array.push(_v_ctrlbls, _ctrlbl)
+    array.push(_v_eps,     _ep)
+    array.push(_v_sls,     _sl)
+    array.push(_v_tps,     _tp)
+    array.push(_v_dirs,    _dir)
 
-// Extend lines + boxes each bar; update live P&L
-if i_show_rr and strategy.position_size != 0 and not na(_v_ebar)
-    line.set_x2(_v_eline, bar_index)
-    line.set_x2(_v_sline, bar_index)
-    line.set_x2(_v_tline, bar_index)
-    box.set_right(_v_tpbox, bar_index + 1)
-    box.set_right(_v_slbox, bar_index + 1)
+    _v_in_trade  := true
+    _v_cur       := array.size(_v_elines) - 1
+    _v_entry_bar := bar_index
 
+// Extend current trade lines + boxes each bar; update live P&L
+if i_show_rr and _v_in_trade and _v_cur >= 0 and strategy.position_size != 0
+    line.set_x2(array.get(_v_elines,  _v_cur), bar_index)
+    line.set_x2(array.get(_v_slines,  _v_cur), bar_index)
+    line.set_x2(array.get(_v_tlines,  _v_cur), bar_index)
+    box.set_right(array.get(_v_tpboxes, _v_cur), bar_index + 1)
+    box.set_right(array.get(_v_slboxes, _v_cur), bar_index + 1)
+
+    _ep_c  = array.get(_v_eps,  _v_cur)
+    _sl_c  = array.get(_v_sls,  _v_cur)
+    _tp_c  = array.get(_v_tps,  _v_cur)
+    _dir_c = array.get(_v_dirs, _v_cur)
     _qty_live = math.abs(strategy.position_size)
-    _open_pnl = _v_dir == "long" ? (close - _v_ep) * _qty_live : (_v_ep - close) * _qty_live
+    _open_pnl = _dir_c == "long" ? (close - _ep_c) * _qty_live : (_ep_c - close) * _qty_live
     _is_pos   = _open_pnl >= 0
-    _ctr_txt  = "PyG Apertura: " + (_is_pos ? "+" : "") + str.tostring(_open_pnl, "#.##") + "  Qty: " + str.tostring(_qty_live, "#.###") + "\nR/R: " + str.tostring(i_rr, "#.#")
+    _ctr_txt  = "PyG Apertura: " + (_is_pos ? "+" : "") + str.tostring(_open_pnl, "#.##") + "  Qty: " + str.tostring(_qty_live, "#.###") + "\nR/R: " + str.tostring(eff_rr_v, "#.#")
 
     _x = bar_index + 2
-    label.set_xy(_v_tplbl,  _x, _v_tp)
-    label.set_xy(_v_sllbl,  _x, _v_sl)
-    label.set_xy(_v_ctrlbl, _x, (_v_tp + _v_sl) / 2)
-    label.set_text(_v_ctrlbl, _ctr_txt)
-    label.set_color(_v_ctrlbl, _is_pos ? color.new(color.teal, 15) : color.new(color.red, 15))
+    label.set_xy(array.get(_v_tplbls,  _v_cur), _x, _tp_c)
+    label.set_xy(array.get(_v_sllbls,  _v_cur), _x, _sl_c)
+    label.set_xy(array.get(_v_ctrlbls, _v_cur), _x, (_tp_c + _sl_c) / 2)
+    label.set_text(array.get(_v_ctrlbls, _v_cur), _ctr_txt)
+    label.set_color(array.get(_v_ctrlbls, _v_cur), _is_pos ? color.new(color.teal, 15) : color.new(color.red, 15))
 
-// On trade close: stamp final result
-if i_show_rr and strategy.position_size == 0 and not na(_v_ebar)
+// On trade close: extend one final bar to include the exit bar, then freeze
+// bar_index > _v_entry_bar prevents false-fire on signal bar (order fills next bar open)
+if i_show_rr and _v_in_trade and _v_cur >= 0 and bar_index > _v_entry_bar and strategy.position_size == 0
+    _tp_c = array.get(_v_tps, _v_cur)
+    _sl_c = array.get(_v_sls, _v_cur)
+    box.set_right(array.get(_v_tpboxes, _v_cur), bar_index + 1)
+    box.set_right(array.get(_v_slboxes, _v_cur), bar_index + 1)
+    line.set_x2(array.get(_v_elines, _v_cur), bar_index)
+    line.set_x2(array.get(_v_slines, _v_cur), bar_index)
+    line.set_x2(array.get(_v_tlines, _v_cur), bar_index)
+    _x = bar_index + 2
+    label.set_xy(array.get(_v_tplbls,  _v_cur), _x, _tp_c)
+    label.set_xy(array.get(_v_sllbls,  _v_cur), _x, _sl_c)
+    label.set_xy(array.get(_v_ctrlbls, _v_cur), _x, (_tp_c + _sl_c) / 2)
     n = strategy.closedtrades
     if n > 0
         pnl    = strategy.closedtrades.profit(n - 1)
         qty    = math.abs(strategy.closedtrades.size(n - 1))
         is_win = pnl > 0
-        res_txt = "PyG Cerrado: " + (is_win ? "+" : "") + str.tostring(pnl, "#.##") + "  Qty: " + str.tostring(qty, "#.###") + "\nR/R: " + str.tostring(i_rr, "#.#")
-        label.set_text(_v_ctrlbl, res_txt)
-        label.set_color(_v_ctrlbl, is_win ? color.new(color.teal, 10) : color.new(color.red, 10))
-    _v_ebar := na
+        res_txt = "PyG Cerrado: " + (is_win ? "+" : "") + str.tostring(pnl, "#.##") + "  Qty: " + str.tostring(qty, "#.###") + "\nR/R: " + str.tostring(eff_rr_v, "#.#")
+        label.set_text(array.get(_v_ctrlbls, _v_cur), res_txt)
+        label.set_color(array.get(_v_ctrlbls, _v_cur), is_win ? color.new(color.teal, 10) : color.new(color.red, 10))
+    _v_in_trade := false
 
 // ================================================================
 // === SHARED - Debug Output
@@ -534,20 +569,18 @@ if i_show_table and barstate.isconfirmed and not na(_atbl)
     _lwr    = _lt > 0 ? _lw / _lt * 100 : 0.0
     _swr    = _st > 0 ? _sw / _st * 100 : 0.0
 
-    _tf     = timeframe.period
-    r_piv   = _tf == "1" ? 3 : _tf == "3" ? 3 : _tf == "5" ? 4 : _tf == "15" ? 5 : _tf == "30" ? 6 : _tf == "60" ? 7 : _tf == "240" ? 8 : 5
-    r_zatr  = _tf == "1" ? 0.3 : _tf == "3" ? 0.35 : _tf == "5" ? 0.4 : _tf == "15" ? 0.5 : _tf == "30" ? 0.6 : _tf == "60" ? 0.7 : _tf == "240" ? 0.8 : 0.5
-    r_sl    = _tf == "1" ? 1.0 : _tf == "3" ? 1.0 : _tf == "5" ? 1.2 : _tf == "15" ? 1.5 : _tf == "30" ? 1.8 : _tf == "60" ? 2.0 : _tf == "240" ? 2.5 : 1.5
-    r_rr    = _tf == "1" ? 1.5 : _tf == "3" ? 1.5 : _tf == "5" ? 1.8 : _tf == "15" ? 2.0 : _tf == "30" ? 2.0 : _tf == "60" ? 2.5 : _tf == "240" ? 2.5 : 2.0
-    r_tch   = (_tf == "1" or _tf == "3" or _tf == "5") ? "Rejection Bar" : "Wick Touch"
-
-    m_piv   = i_s1_pivot_l == r_piv and i_s1_pivot_r == r_piv
-    m_zatr  = math.abs(i_s1_zone_atr - r_zatr) < 0.05
-    m_sl    = math.abs(i_sl_mult - r_sl) < 0.1
-    m_rr    = math.abs(i_rr - r_rr) < 0.1
-    m_tch   = i_s1_touch == r_tch
+    // Match: compare effective (active) values against TF-based suggested values
+    m_piv   = eff_pivot_l == _as_piv and eff_pivot_r == _as_piv
+    m_zatr  = math.abs(eff_zatr  - _as_zatr) < 0.05
+    m_sl    = math.abs(eff_sl_m  - _as_sl)   < 0.1
+    m_rr    = math.abs(eff_rr_v  - _as_rr)   < 0.1
+    m_tch   = eff_touch == _as_tch
     m_tr    = i_use_trend
     _score  = (m_piv ? 1 : 0) + (m_zatr ? 1 : 0) + (m_sl ? 1 : 0) + (m_rr ? 1 : 0) + (m_tch ? 1 : 0) + (m_tr ? 1 : 0)
+
+    // Auto-suggest header (shows [AUTO ON] when active)
+    _as_hdr = i_auto_suggest ? "RECOMMENDATIONS  |  TF: " + _as_tf + "  [AUTO ON]" : "RECOMMENDATIONS  |  TF: " + _as_tf
+    table.cell(_atbl, 0, 9, _as_hdr, bgcolor=C_HDR, text_color=i_auto_suggest ? C_GRN : C_WHT, text_size=size.tiny, text_halign=text.align_left)
 
     // Performance data cols
     table.cell(_atbl, 1, 2, str.tostring(_total), bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_center)
@@ -565,12 +598,12 @@ if i_show_table and barstate.isconfirmed and not na(_atbl)
     table.cell(_atbl, 1, 8, str.tostring(_swr, "#.1") + "% (" + str.tostring(_st) + ")", bgcolor=C_BG, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_center)
     table.cell(_atbl, 2, 8, _swr >= 55 ? "GOOD" : _swr >= 50 ? "OK" : "LOW", bgcolor=C_BG, text_color=_swr >= 55 ? C_GRN : _swr >= 50 ? C_ORG : C_RED, text_size=size.tiny, text_halign=text.align_center)
 
-    // Recommendations current cols
-    _cur_tch = i_s1_touch == "Wick Touch" ? "Wick" : i_s1_touch == "Rejection Bar" ? "Reject" : "Body"
-    table.cell(_atbl, 1, 10, str.tostring(i_s1_pivot_l) + "/" + str.tostring(i_s1_pivot_r), bgcolor=C_BG, text_color=m_piv ? C_GRN : C_ORG, text_size=size.tiny, text_halign=text.align_center)
-    table.cell(_atbl, 1, 11, str.tostring(i_s1_zone_atr, "#.##"), bgcolor=C_BG, text_color=m_zatr ? C_GRN : C_ORG, text_size=size.tiny, text_halign=text.align_center)
-    table.cell(_atbl, 1, 12, str.tostring(i_sl_mult, "#.#"), bgcolor=C_BG, text_color=m_sl ? C_GRN : C_ORG, text_size=size.tiny, text_halign=text.align_center)
-    table.cell(_atbl, 1, 13, str.tostring(i_rr, "#.#"), bgcolor=C_BG, text_color=m_rr ? C_GRN : C_ORG, text_size=size.tiny, text_halign=text.align_center)
+    // Recommendations current cols (show effective/active values)
+    _cur_tch = eff_touch == "Wick Touch" ? "Wick" : eff_touch == "Rejection Bar" ? "Reject" : "Body"
+    table.cell(_atbl, 1, 10, str.tostring(eff_pivot_l) + "/" + str.tostring(eff_pivot_r), bgcolor=C_BG, text_color=m_piv ? C_GRN : C_ORG, text_size=size.tiny, text_halign=text.align_center)
+    table.cell(_atbl, 1, 11, str.tostring(eff_zatr, "#.##"), bgcolor=C_BG, text_color=m_zatr ? C_GRN : C_ORG, text_size=size.tiny, text_halign=text.align_center)
+    table.cell(_atbl, 1, 12, str.tostring(eff_sl_m, "#.#"), bgcolor=C_BG, text_color=m_sl ? C_GRN : C_ORG, text_size=size.tiny, text_halign=text.align_center)
+    table.cell(_atbl, 1, 13, str.tostring(eff_rr_v, "#.#"), bgcolor=C_BG, text_color=m_rr ? C_GRN : C_ORG, text_size=size.tiny, text_halign=text.align_center)
     table.cell(_atbl, 1, 14, _cur_tch, bgcolor=C_BG, text_color=m_tch ? C_GRN : C_ORG, text_size=size.tiny, text_halign=text.align_center)
     table.cell(_atbl, 1, 15, i_use_trend ? "ON" : "OFF", bgcolor=C_BG, text_color=m_tr ? C_GRN : C_ORG, text_size=size.tiny, text_halign=text.align_center)
 
@@ -582,7 +615,7 @@ if i_show_table and barstate.isconfirmed and not na(_atbl)
 
     // Row 17 - Risk per trade + break-even win rate
     _risk_disp  = strategy.equity * i_risk_pct / 100
-    _be_wr      = 1.0 / (1.0 + i_rr) * 100
+    _be_wr      = 1.0 / (1.0 + eff_rr_v) * 100
     _be_col     = _wr >= _be_wr ? C_GRN : C_RED
     table.cell(_atbl, 1, 17, "$" + str.tostring(_risk_disp, "#.##"), bgcolor=C_FTR, text_color=C_WHT, text_size=size.tiny, text_halign=text.align_center)
     table.cell(_atbl, 2, 17, str.tostring(_be_wr, "#.1") + "%", bgcolor=C_FTR, text_color=_be_col, text_size=size.tiny, text_halign=text.align_center)
