@@ -1,0 +1,84 @@
+//@version=6
+strategy("Scalping ACC", overlay=true, default_qty_type=strategy.fixed, default_qty_value=1)
+
+// -- INPUTS -------------------------------------------------------------------
+i_minBreak      = input.float(2.0,    "Min Breakout (pips)")
+i_minCandlePips = input.float(100.0,  "Min Break Candle (pips)",  tooltip="Tamano minimo de la vela que rompe el nivel")
+i_minPrevPips   = input.float(100.0,  "Min Prev Candle (pips)",   tooltip="Tamano minimo de la vela anterior al rompimiento")
+i_extraSL       = input.float(2.0,    "Extra SL (pips)")
+i_rr            = input.float(2.0,    "RR Ratio", step=0.5)
+i_pip           = input.float(0.0001, "Pip Size")
+
+// -- HELPERS ------------------------------------------------------------------
+_green = close > open
+_red   = close < open
+_bTop  = math.max(open, close)
+_bBot  = math.min(open, close)
+_bTop1 = math.max(open[1], close[1])
+_bBot1 = math.min(open[1], close[1])
+
+// -- ZONE DETECTION -----------------------------------------------------------
+_candlePips = (high - low)       / i_pip   // tamano de la vela que rompe
+_prevPips   = (high[1] - low[1]) / i_pip   // tamano de la vela anterior
+_bearBreak  = (_bBot1 - close)  / i_pip   // pips reales de rompimiento bajista
+_bullBreak  = (close - _bTop1)  / i_pip   // pips reales de rompimiento alcista
+
+// Techo rojo: vela roja cierra por debajo del cuerpo inferior de la vela verde anterior
+bearSetup = _red   and _green[1] and close < _bBot1
+          and _candlePips >= i_minCandlePips and _prevPips >= i_minPrevPips and _bearBreak >= i_minBreak
+// Piso verde: vela verde cierra por encima del cuerpo superior de la vela roja anterior
+bullSetup = _green and _red[1]   and close > _bTop1
+          and _candlePips >= i_minCandlePips and _prevPips >= i_minPrevPips and _bullBreak >= i_minBreak
+
+// -- ZONE STATE ---------------------------------------------------------------
+var float zTop  = na
+var float zBot  = na
+var bool  zBear = false
+var bool  zOn   = false
+var box   zBox  = na
+
+if bearSetup
+    zTop  := math.max(high, high[1])   // mecha superior del par
+    zBot  := _bBot1                     // cuerpo inferior de la vela verde
+    zBear := true
+    zOn   := true
+    zBox  := box.new(left=bar_index[1], top=zTop, right=bar_index, bottom=zBot,
+                     border_color=color.red, bgcolor=color.new(color.red, 85))
+
+if bullSetup
+    zTop  := _bTop1                              // cuerpo superior de la vela roja
+    zBot  := math.min(low, low[1])              // mecha inferior del par
+    zBear := false
+    zOn   := true
+    zBox  := box.new(left=bar_index[1], top=zTop, right=bar_index, bottom=zBot,
+                     border_color=color.green, bgcolor=color.new(color.green, 85))
+
+// Extender caja activa con cada vela nueva
+if zOn and not na(zBox)
+    box.set_right(zBox, bar_index)
+
+// Desactivar zona si el cuerpo de una vela cierra dentro de la caja
+if zOn and _bTop < zTop and _bBot > zBot
+    zOn := false
+
+// -- ENTRY --------------------------------------------------------------------
+bearEntry = zOn and zBear     and _red   and _bTop <= zTop and _bBot >= zBot
+bullEntry = zOn and not zBear and _green and _bTop <= zTop and _bBot >= zBot
+
+if bearEntry and strategy.position_size == 0
+    slPrice = zTop + i_extraSL * i_pip
+    tpPrice = close - (slPrice - close) * i_rr
+    strategy.entry("Sell", strategy.short)
+    strategy.exit("SX", "Sell", stop=slPrice, limit=tpPrice)
+    zOn := false
+
+if bullEntry and strategy.position_size == 0
+    slPrice = zBot - i_extraSL * i_pip
+    tpPrice = close + (close - slPrice) * i_rr
+    strategy.entry("Buy", strategy.long)
+    strategy.exit("BX", "Buy", stop=slPrice, limit=tpPrice)
+    zOn := false
+
+// -- VISUALS ------------------------------------------------------------------
+plotshape(bearEntry, "Sell", shape.labeldown, location.abovebar, color.red,   text="SELL NOW", textcolor=color.white)
+plotshape(bullEntry, "Buy",  shape.labelup,   location.belowbar, color.green, text="BUY NOW",  textcolor=color.white)
