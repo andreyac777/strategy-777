@@ -3,11 +3,13 @@ strategy("Scalping ACC", overlay=true, default_qty_type=strategy.fixed, default_
 
 // -- INPUTS -------------------------------------------------------------------
 i_minBreak      = input.float(2.0,    "Min Breakout (pips)")
-i_minCandlePips = input.float(100.0,  "Min Break Candle (pips)",  tooltip="Tamano minimo de la vela que rompe el nivel")
-i_minPrevPips   = input.float(100.0,  "Min Prev Candle (pips)",   tooltip="Tamano minimo de la vela anterior al rompimiento")
+i_minCandlePips = input.float(60.0,  "Min Break Candle (pips)",  tooltip="Tamano minimo de la vela que rompe el nivel")
+i_minPrevPips   = input.float(60.0,  "Min Prev Candle (pips)",   tooltip="Tamano minimo de la vela anterior al rompimiento")
 i_extraSL       = input.float(2.0,    "Extra SL (pips)")
 i_rr            = input.float(2.0,    "RR Ratio", step=0.5)
-i_pip           = input.float(0.0001, "Pip Size")
+i_pip           = input.float(1, "Pip Size")
+
+MAX_Z = 10   // slots por color
 
 // -- HELPERS ------------------------------------------------------------------
 _green = close > open
@@ -17,67 +19,129 @@ _bBot  = math.min(open, close)
 _bTop1 = math.max(open[1], close[1])
 _bBot1 = math.min(open[1], close[1])
 
+// -- ZONE ARRAYS (hasta 10 rojas + 10 verdes) ---------------------------------
+var rBoxes = array.new_box(0)
+var rTops  = array.new_float(0)
+var rBots  = array.new_float(0)
+
+var gBoxes = array.new_box(0)
+var gTops  = array.new_float(0)
+var gBots  = array.new_float(0)
+
+// Candle (h,l) toca zona (t,b)?
+f_touch(h, l, t, b) => h >= b and l <= t
+
+// -- EXTEND + DEACTIVATE (se ejecuta cada barra) ------------------------------
+// Pasada 1: extender + marcar muertas. Pasada 2: remover con offset (sin by -1)
+
+// Rojas: mueren si vela verde cierra sobre el techo
+if array.size(rBoxes) > 0
+    dead_r = array.new_bool(0)
+    for i = 0 to array.size(rBoxes) - 1
+        box.set_right(array.get(rBoxes, i), bar_index)
+        array.push(dead_r, _green and close > array.get(rTops, i))
+    off = 0
+    for i = 0 to array.size(dead_r) - 1
+        if array.get(dead_r, i)
+            j = i - off
+            array.remove(rBoxes, j)
+            array.remove(rTops,  j)
+            array.remove(rBots,  j)
+            off := off + 1
+
+// Verdes: mueren si vela roja cierra bajo el piso
+if array.size(gBoxes) > 0
+    dead_g = array.new_bool(0)
+    for i = 0 to array.size(gBoxes) - 1
+        box.set_right(array.get(gBoxes, i), bar_index)
+        array.push(dead_g, _red and close < array.get(gBots, i))
+    off = 0
+    for i = 0 to array.size(dead_g) - 1
+        if array.get(dead_g, i)
+            j = i - off
+            array.remove(gBoxes, j)
+            array.remove(gTops,  j)
+            array.remove(gBots,  j)
+            off := off + 1
+
 // -- ZONE DETECTION -----------------------------------------------------------
-_candlePips = (high - low)       / i_pip   // tamano de la vela que rompe
-_prevPips   = (high[1] - low[1]) / i_pip   // tamano de la vela anterior
-_bearBreak  = (_bBot1 - close)  / i_pip   // pips reales de rompimiento bajista
-_bullBreak  = (close - _bTop1)  / i_pip   // pips reales de rompimiento alcista
+_candlePips = (high - low)       / i_pip
+_prevPips   = (high[1] - low[1]) / i_pip
+_bearBreak  = (_bBot1 - close)   / i_pip
+_bullBreak  = (close - _bTop1)   / i_pip
 
-// Techo rojo: vela roja cierra por debajo del cuerpo inferior de la vela verde anterior
-bearSetup = _red   and _green[1] and close < _bBot1
-          and _candlePips >= i_minCandlePips and _prevPips >= i_minPrevPips and _bearBreak >= i_minBreak
-// Piso verde: vela verde cierra por encima del cuerpo superior de la vela roja anterior
-bullSetup = _green and _red[1]   and close > _bTop1
-          and _candlePips >= i_minCandlePips and _prevPips >= i_minPrevPips and _bullBreak >= i_minBreak
+// Par bloqueado si toca cualquier zona activa (evaluado despues de deactivaciones)
+_blocked = false
+if array.size(rBoxes) > 0
+    for i = 0 to array.size(rBoxes) - 1
+        if f_touch(high, low, array.get(rTops,i), array.get(rBots,i)) or
+           f_touch(high[1], low[1], array.get(rTops,i), array.get(rBots,i))
+            _blocked := true
+            break
+if not _blocked and array.size(gBoxes) > 0
+    for i = 0 to array.size(gBoxes) - 1
+        if f_touch(high, low, array.get(gTops,i), array.get(gBots,i)) or
+           f_touch(high[1], low[1], array.get(gTops,i), array.get(gBots,i))
+            _blocked := true
+            break
 
-// -- ZONE STATE ---------------------------------------------------------------
-var float zTop  = na
-var float zBot  = na
-var bool  zBear = false
-var bool  zOn   = false
-var box   zBox  = na
+_sizeOk   = _candlePips >= i_minCandlePips and _prevPips >= i_minPrevPips
+bearSetup = _red   and _green[1] and close < _bBot1 and _bearBreak >= i_minBreak and _sizeOk and not _blocked
+bullSetup = _green and _red[1]   and close > _bTop1 and _bullBreak >= i_minBreak and _sizeOk and not _blocked
 
-if bearSetup
-    zTop  := math.max(high, high[1])   // mecha superior del par
-    zBot  := _bBot1                     // cuerpo inferior de la vela verde
-    zBear := true
-    zOn   := true
-    zBox  := box.new(left=bar_index[1], top=zTop, right=bar_index, bottom=zBot,
-                     border_color=color.red, bgcolor=color.new(color.red, 85))
+// -- ADD NEW ZONES ------------------------------------------------------------
+if bearSetup and array.size(rBoxes) < MAX_Z
+    t  = math.max(high, high[1])
+    b  = _bBot1
+    bx = box.new(left=bar_index[1], top=t, right=bar_index, bottom=b,
+                 border_color=color.red, bgcolor=color.new(color.red, 85))
+    array.push(rBoxes, bx)
+    array.push(rTops,  t)
+    array.push(rBots,  b)
 
-if bullSetup
-    zTop  := _bTop1                              // cuerpo superior de la vela roja
-    zBot  := math.min(low, low[1])              // mecha inferior del par
-    zBear := false
-    zOn   := true
-    zBox  := box.new(left=bar_index[1], top=zTop, right=bar_index, bottom=zBot,
-                     border_color=color.green, bgcolor=color.new(color.green, 85))
-
-// Extender caja activa con cada vela nueva
-if zOn and not na(zBox)
-    box.set_right(zBox, bar_index)
-
-// Desactivar zona si el cuerpo de una vela cierra dentro de la caja
-if zOn and _bTop < zTop and _bBot > zBot
-    zOn := false
+if bullSetup and array.size(gBoxes) < MAX_Z
+    t  = _bTop1
+    b  = math.min(low, low[1])
+    bx = box.new(left=bar_index[1], top=t, right=bar_index, bottom=b,
+                 border_color=color.green, bgcolor=color.new(color.green, 85))
+    array.push(gBoxes, bx)
+    array.push(gTops,  t)
+    array.push(gBots,  b)
 
 // -- ENTRY --------------------------------------------------------------------
-bearEntry = zOn and zBear     and _red   and _bTop <= zTop and _bBot >= zBot
-bullEntry = zOn and not zBear and _green and _bTop <= zTop and _bBot >= zBot
+bearEntry    = false
+bearEntryTop = float(na)
+if array.size(rBoxes) > 0
+    for i = 0 to array.size(rBoxes) - 1
+        t = array.get(rTops, i)
+        b = array.get(rBots, i)
+        if _red and _bTop <= t and _bBot >= b
+            bearEntry    := true
+            bearEntryTop := t
+            break
+
+bullEntry    = false
+bullEntryBot = float(na)
+if array.size(gBoxes) > 0
+    for i = 0 to array.size(gBoxes) - 1
+        t = array.get(gTops, i)
+        b = array.get(gBots, i)
+        if _green and _bTop <= t and _bBot >= b
+            bullEntry    := true
+            bullEntryBot := b
+            break
 
 if bearEntry and strategy.position_size == 0
-    slPrice = zTop + i_extraSL * i_pip
+    slPrice = bearEntryTop + i_extraSL * i_pip
     tpPrice = close - (slPrice - close) * i_rr
     strategy.entry("Sell", strategy.short)
     strategy.exit("SX", "Sell", stop=slPrice, limit=tpPrice)
-    zOn := false
 
 if bullEntry and strategy.position_size == 0
-    slPrice = zBot - i_extraSL * i_pip
+    slPrice = bullEntryBot - i_extraSL * i_pip
     tpPrice = close + (close - slPrice) * i_rr
     strategy.entry("Buy", strategy.long)
     strategy.exit("BX", "Buy", stop=slPrice, limit=tpPrice)
-    zOn := false
 
 // -- VISUALS ------------------------------------------------------------------
 plotshape(bearEntry, "Sell", shape.labeldown, location.abovebar, color.red,   text="SELL NOW", textcolor=color.white)
