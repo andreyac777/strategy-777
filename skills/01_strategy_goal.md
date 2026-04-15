@@ -24,7 +24,7 @@ La estrategia debe tener eel siguiente motor:
     - Con una vela de continuacion indistintamente si esta dentro o fuera de la caja, si la vela que continue se encuentra despues de una caja roja, entonces entramos en ventas, si por el contrario es una caja verde, entramos en compras.
 6. ¿Cuándo NO entrar?
     - Cuando hay muy pocos pips de rompimiento, esto debe ser configurable por el usuario.
-    - Cuando le vela anterior es anterior a 100 pips.
+    - Cuando le vela anterior es inferior a 100 pips.
 7. ¿Cuándo salir?
     - debe ser definido  por el usuario, pero el stop loss va a ser de la cantidad de pips de la vela que rompio mas unos pocos pips mas definidos por el usuario, mientras que el profit el usuario debe definir si es un 1:1 o 1:2 segun este parametro de stop loss.
 8. ¿Qué filtros mejoran la rentabilidad?

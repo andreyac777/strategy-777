@@ -1,5 +1,5 @@
 //@version=6
-strategy("Scalping ACC", overlay=true, default_qty_type=strategy.fixed, default_qty_value=1)
+strategy("Scalping ACC", overlay=true, default_qty_type=strategy.fixed, default_qty_value=1, process_orders_on_close=true)
 
 // -- INPUTS -------------------------------------------------------------------
 i_minBreak      = input.float(2.0,    "Min Breakout (pips)")
@@ -8,6 +8,11 @@ i_minPrevPips   = input.float(60.0,  "Min Prev Candle (pips)",   tooltip="Tamano
 i_extraSL       = input.float(2.0,    "Extra SL (pips)")
 i_rr            = input.float(2.0,    "RR Ratio", step=0.5)
 i_pip           = input.float(1, "Pip Size")
+i_cooldown      = input.int(5,     "Bars Until New Entry", minval=1)
+i_postTrade     = input.int(4,     "Bars After SL/TP",    minval=0)
+i_sesStart      = input.int(7,   "Session Start (hour)", minval=0, maxval=23, tooltip="Hora de inicio en tu horario local")
+i_sesEnd        = input.int(12,  "Session End   (hour)", minval=0, maxval=23, tooltip="Hora de cierre en tu horario local")
+i_utcOffset     = input.int(-6,  "UTC Offset",           minval=-12, maxval=14, tooltip="Diferencia con UTC. Colombia = -6 | Nueva York EDT = -4 | Londres GMT = 0")
 i_debug         = input.bool(false, "Debug Zones")
 
 MAX_Z = 10   // slots por color
@@ -99,7 +104,11 @@ prevBearSetup := bearSetup
 prevBullSetup := bullSetup
 
 // -- ADD NEW ZONES ------------------------------------------------------------
-if bearSetup and array.size(rBoxes) < MAX_Z
+if bearSetup
+    if array.size(rBoxes) >= MAX_Z
+        box.delete(array.remove(rBoxes, 0))
+        array.remove(rTops, 0)
+        array.remove(rBots, 0)
     t  = math.max(high, high[1])
     b  = _bBot1
     bx = box.new(left=bar_index[1], top=t, right=bar_index, bottom=b,
@@ -108,7 +117,11 @@ if bearSetup and array.size(rBoxes) < MAX_Z
     array.push(rTops,  t)
     array.push(rBots,  b)
 
-if bullSetup and array.size(gBoxes) < MAX_Z
+if bullSetup
+    if array.size(gBoxes) >= MAX_Z
+        box.delete(array.remove(gBoxes, 0))
+        array.remove(gTops, 0)
+        array.remove(gBots, 0)
     t  = _bTop1
     b  = math.min(low, low[1])
     bx = box.new(left=bar_index[1], top=t, right=bar_index, bottom=b,
@@ -118,24 +131,23 @@ if bullSetup and array.size(gBoxes) < MAX_Z
     array.push(gBots,  b)
 
 // -- TRADE TRACKING -----------------------------------------------------------
-var bool trActive = false
-var box  trRisk   = na
-var box  trProfit = na
-var int  nWins    = 0
-var int  nLosses  = 0
-var int  nClosed  = 0
+var bool trActive    = false
+var box  trRisk      = na
+var box  trProfit    = na
+var int  nWins       = 0
+var int  nLosses     = 0
+var int  nClosed     = 0
+var int  lastEntryBar  = -999
+var int  lastCloseBar  = -999
 
 // -- ENTRY --------------------------------------------------------------------
-// Entrada en la barra inmediata despues del setup, sin importar el color.
-bearEntry = bearSetup[1]
-bullEntry = bullSetup[1]
-
 // Extend R/R boxes PRIMERO para que siempre alcancen la barra de salida
 if trActive
     box.set_right(trRisk,   bar_index)
     box.set_right(trProfit, bar_index)
 
-// Detectar trade cerrado -> actualizar contadores, marcar cajas terminadas
+// Detectar trade cerrado ANTES de calcular gates para que lastCloseBar
+// quede actualizado en esta misma barra y _postTradeOk lo tome en cuenta.
 if strategy.closedtrades > nClosed
     cnt = strategy.closedtrades
     p   = strategy.closedtrades.profit(cnt - 1)
@@ -143,33 +155,47 @@ if strategy.closedtrades > nClosed
         nWins := nWins + 1
     else
         nLosses := nLosses + 1
-    nClosed  := cnt
-    trActive := false
+    nClosed      := cnt
+    lastCloseBar := bar_index
+    trActive     := false
+
+// Gates de entrada (evaluadas despues del cierre para que postTrade sea exacto)
+_cooldownOk  = (bar_index - lastEntryBar) >= i_cooldown
+_postTradeOk = (bar_index - lastCloseBar) >= i_postTrade
+_utcHour     = math.floor(time / 3600000) % 24
+_localHour   = (_utcHour + i_utcOffset + 24) % 24
+_inSession   = _localHour >= i_sesStart and _localHour < i_sesEnd
+bearEntry = bearSetup[1] and _cooldownOk and _postTradeOk and _inSession
+bullEntry = bullSetup[1] and _cooldownOk and _postTradeOk and _inSession
 
 if bearEntry and strategy.position_size == 0
     slDist  = (high[1] - low[1]) + i_extraSL * i_pip
-    slPrice = close + slDist
-    tpPrice = close - slDist * i_rr
+    eRef    = _bBot1   // cuerpo inferior de la vela roja de rompimiento
+    slPrice = eRef + slDist
+    tpPrice = eRef - slDist * i_rr
     strategy.entry("Sell", strategy.short)
     strategy.exit("SX", "Sell", stop=slPrice, limit=tpPrice)
-    trRisk   := box.new(bar_index, slPrice, bar_index + 1, close,   border_color=color.red,  bgcolor=color.new(color.red,  80))
-    trProfit := box.new(bar_index, close,   bar_index + 1, tpPrice, border_color=color.teal, bgcolor=color.new(color.teal, 80))
-    trActive := true
+    trRisk        := box.new(bar_index, slPrice, bar_index + 1, eRef,    border_color=color.red,  bgcolor=color.new(color.red,  80))
+    trProfit      := box.new(bar_index, eRef,    bar_index + 1, tpPrice, border_color=color.teal, bgcolor=color.new(color.teal, 80))
+    trActive      := true
+    lastEntryBar  := bar_index
 
 if bullEntry and strategy.position_size == 0
     slDist  = (high[1] - low[1]) + i_extraSL * i_pip
-    slPrice = close - slDist
-    tpPrice = close + slDist * i_rr
+    eRef    = _bTop1   // cuerpo superior de la vela verde de rompimiento
+    slPrice = eRef - slDist
+    tpPrice = eRef + slDist * i_rr
     strategy.entry("Buy", strategy.long)
     strategy.exit("BX", "Buy", stop=slPrice, limit=tpPrice)
-    trRisk   := box.new(bar_index, close,   bar_index + 1, slPrice, border_color=color.red,  bgcolor=color.new(color.red,  80))
-    trProfit := box.new(bar_index, tpPrice, bar_index + 1, close,   border_color=color.teal, bgcolor=color.new(color.teal, 80))
-    trActive := true
+    trRisk        := box.new(bar_index, eRef,    bar_index + 1, slPrice, border_color=color.red,  bgcolor=color.new(color.red,  80))
+    trProfit      := box.new(bar_index, tpPrice, bar_index + 1, eRef,    border_color=color.teal, bgcolor=color.new(color.teal, 80))
+    trActive      := true
+    lastEntryBar  := bar_index
 
 // -- RR RECOMMENDATION TABLE --------------------------------------------------
-var table tbl = table.new(position.top_right, 2, 6, border_width=1)
+var table tbl = table.new(position.bottom_right, 2, 6, border_width=1)
 
-if barstate.islast
+if true
     nTotal = nWins + nLosses
     wr     = nTotal > 0 ? nWins / nTotal : 0.0
     ev11   = wr * 1.0 - (1.0 - wr) * 1.0
@@ -190,7 +216,7 @@ if barstate.islast
     table.cell(tbl, 1, 5, bestRR,       text_color=color.yellow, bgcolor=color.navy, text_size=size.small)
 
 // -- DEBUG TABLE --------------------------------------------------------------
-var table dbg = table.new(position.top_left, 2, 3, border_width=1)
+var table dbg = table.new(position.top_right, 2, 3, border_width=1)
 
 if i_debug
     rCount = array.size(rBoxes)
