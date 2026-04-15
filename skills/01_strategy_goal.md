@@ -21,7 +21,7 @@ La estrategia debe tener eel siguiente motor:
     - Las caja va a ser dinamicas, va a ir extendiendo su ancho hacia la derecha por cada vela nueva encontrada.
     - la caja va a dejar de extenderse si una vela roja cierra con su cuerpo por debajo de la caja.
 5. ¿Cuándo entrar al mercado?
-    - Con una vela de continuacion, si la vela de continuacion es roja en una caja roja, se entra en ventas, mientras que si la vela de continuacion es verde en una caja verde se entra en compras.
+    - Con una vela de continuacion indistintamente si esta dentro o fuera de la caja, si la vela que continue se encuentra despues de una caja roja, entonces entramos en ventas, si por el contrario es una caja verde, entramos en compras.
 6. ¿Cuándo NO entrar?
     - Cuando hay muy pocos pips de rompimiento, esto debe ser configurable por el usuario.
     - Cuando le vela anterior es anterior a 100 pips.

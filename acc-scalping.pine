@@ -8,6 +8,7 @@ i_minPrevPips   = input.float(60.0,  "Min Prev Candle (pips)",   tooltip="Tamano
 i_extraSL       = input.float(2.0,    "Extra SL (pips)")
 i_rr            = input.float(2.0,    "RR Ratio", step=0.5)
 i_pip           = input.float(1, "Pip Size")
+i_debug         = input.bool(false, "Debug Zones")
 
 MAX_Z = 10   // slots por color
 
@@ -31,6 +32,10 @@ var gBots  = array.new_float(0)
 // Candle (h,l) toca zona (t,b)?
 f_touch(h, l, t, b) => h >= b and l <= t
 
+// Flags del setup del bar anterior (para proteger zonas en la barra de entrada)
+var bool prevBearSetup = false
+var bool prevBullSetup = false
+
 // -- EXTEND + DEACTIVATE (se ejecuta cada barra) ------------------------------
 // Pasada 1: extender + marcar muertas. Pasada 2: remover con offset (sin by -1)
 
@@ -39,7 +44,7 @@ if array.size(rBoxes) > 0
     dead_r = array.new_bool(0)
     for i = 0 to array.size(rBoxes) - 1
         box.set_right(array.get(rBoxes, i), bar_index)
-        array.push(dead_r, _green and close > array.get(rTops, i))
+        array.push(dead_r, _green and close > array.get(rTops, i) and not prevBearSetup)
     off = 0
     for i = 0 to array.size(dead_r) - 1
         if array.get(dead_r, i)
@@ -54,7 +59,7 @@ if array.size(gBoxes) > 0
     dead_g = array.new_bool(0)
     for i = 0 to array.size(gBoxes) - 1
         box.set_right(array.get(gBoxes, i), bar_index)
-        array.push(dead_g, _red and close < array.get(gBots, i))
+        array.push(dead_g, _red and close < array.get(gBots, i) and not prevBullSetup)
     off = 0
     for i = 0 to array.size(dead_g) - 1
         if array.get(dead_g, i)
@@ -65,7 +70,7 @@ if array.size(gBoxes) > 0
             off := off + 1
 
 // -- ZONE DETECTION -----------------------------------------------------------
-_candlePips = (high - low)       / i_pip
+_candlePips = math.abs(close - open) / i_pip
 _prevPips   = (high[1] - low[1]) / i_pip
 _bearBreak  = (_bBot1 - close)   / i_pip
 _bullBreak  = (close - _bTop1)   / i_pip
@@ -89,6 +94,10 @@ _sizeOk   = _candlePips >= i_minCandlePips and _prevPips >= i_minPrevPips
 bearSetup = _red   and _green[1] and close < _bBot1 and _bearBreak >= i_minBreak and _sizeOk and not _blocked
 bullSetup = _green and _red[1]   and close > _bTop1 and _bullBreak >= i_minBreak and _sizeOk and not _blocked
 
+// Guardar para el proximo bar (usado en deactivacion)
+prevBearSetup := bearSetup
+prevBullSetup := bullSetup
+
 // -- ADD NEW ZONES ------------------------------------------------------------
 if bearSetup and array.size(rBoxes) < MAX_Z
     t  = math.max(high, high[1])
@@ -108,40 +117,90 @@ if bullSetup and array.size(gBoxes) < MAX_Z
     array.push(gTops,  t)
     array.push(gBots,  b)
 
-// -- ENTRY --------------------------------------------------------------------
-bearEntry    = false
-bearEntryTop = float(na)
-if array.size(rBoxes) > 0
-    for i = 0 to array.size(rBoxes) - 1
-        t = array.get(rTops, i)
-        b = array.get(rBots, i)
-        if _red and _bTop <= t and _bBot >= b
-            bearEntry    := true
-            bearEntryTop := t
-            break
+// -- TRADE TRACKING -----------------------------------------------------------
+var bool trActive = false
+var box  trRisk   = na
+var box  trProfit = na
+var int  nWins    = 0
+var int  nLosses  = 0
+var int  nClosed  = 0
 
-bullEntry    = false
-bullEntryBot = float(na)
-if array.size(gBoxes) > 0
-    for i = 0 to array.size(gBoxes) - 1
-        t = array.get(gTops, i)
-        b = array.get(gBots, i)
-        if _green and _bTop <= t and _bBot >= b
-            bullEntry    := true
-            bullEntryBot := b
-            break
+// -- ENTRY --------------------------------------------------------------------
+// Entrada en la barra inmediata despues del setup, sin importar el color.
+bearEntry = bearSetup[1]
+bullEntry = bullSetup[1]
+
+// Extend R/R boxes PRIMERO para que siempre alcancen la barra de salida
+if trActive
+    box.set_right(trRisk,   bar_index)
+    box.set_right(trProfit, bar_index)
+
+// Detectar trade cerrado -> actualizar contadores, marcar cajas terminadas
+if strategy.closedtrades > nClosed
+    cnt = strategy.closedtrades
+    p   = strategy.closedtrades.profit(cnt - 1)
+    if p >= 0
+        nWins := nWins + 1
+    else
+        nLosses := nLosses + 1
+    nClosed  := cnt
+    trActive := false
 
 if bearEntry and strategy.position_size == 0
-    slPrice = bearEntryTop + i_extraSL * i_pip
-    tpPrice = close - (slPrice - close) * i_rr
+    slDist  = (high[1] - low[1]) + i_extraSL * i_pip
+    slPrice = close + slDist
+    tpPrice = close - slDist * i_rr
     strategy.entry("Sell", strategy.short)
     strategy.exit("SX", "Sell", stop=slPrice, limit=tpPrice)
+    trRisk   := box.new(bar_index, slPrice, bar_index + 1, close,   border_color=color.red,  bgcolor=color.new(color.red,  80))
+    trProfit := box.new(bar_index, close,   bar_index + 1, tpPrice, border_color=color.teal, bgcolor=color.new(color.teal, 80))
+    trActive := true
 
 if bullEntry and strategy.position_size == 0
-    slPrice = bullEntryBot - i_extraSL * i_pip
-    tpPrice = close + (close - slPrice) * i_rr
+    slDist  = (high[1] - low[1]) + i_extraSL * i_pip
+    slPrice = close - slDist
+    tpPrice = close + slDist * i_rr
     strategy.entry("Buy", strategy.long)
     strategy.exit("BX", "Buy", stop=slPrice, limit=tpPrice)
+    trRisk   := box.new(bar_index, close,   bar_index + 1, slPrice, border_color=color.red,  bgcolor=color.new(color.red,  80))
+    trProfit := box.new(bar_index, tpPrice, bar_index + 1, close,   border_color=color.teal, bgcolor=color.new(color.teal, 80))
+    trActive := true
+
+// -- RR RECOMMENDATION TABLE --------------------------------------------------
+var table tbl = table.new(position.top_right, 2, 6, border_width=1)
+
+if barstate.islast
+    nTotal = nWins + nLosses
+    wr     = nTotal > 0 ? nWins / nTotal : 0.0
+    ev11   = wr * 1.0 - (1.0 - wr) * 1.0
+    ev12   = wr * 2.0 - (1.0 - wr) * 1.0
+    ev13   = wr * 3.0 - (1.0 - wr) * 1.0
+    bestRR = ev13 >= ev12 and ev13 >= ev11 ? "1:3" : ev12 >= ev11 ? "1:2" : "1:1"
+    table.cell(tbl, 0, 0, "RR ANALYSIS", text_color=color.white,  bgcolor=color.gray, text_size=size.small)
+    table.cell(tbl, 1, 0, str.tostring(nWins) + "W / " + str.tostring(nLosses) + "L", text_color=color.white, bgcolor=color.gray, text_size=size.small)
+    table.cell(tbl, 0, 1, "Win Rate",    text_color=color.white,  bgcolor=color.navy, text_size=size.small)
+    table.cell(tbl, 1, 1, str.tostring(math.round(wr * 100.0, 1)) + "%", text_color=color.white, bgcolor=color.navy, text_size=size.small)
+    table.cell(tbl, 0, 2, "EV 1:1",     text_color=color.white,  bgcolor=color.navy, text_size=size.small)
+    table.cell(tbl, 1, 2, str.tostring(math.round(ev11, 2)), text_color=ev11 >= 0.0 ? color.lime : color.red, bgcolor=color.navy, text_size=size.small)
+    table.cell(tbl, 0, 3, "EV 1:2",     text_color=color.white,  bgcolor=color.navy, text_size=size.small)
+    table.cell(tbl, 1, 3, str.tostring(math.round(ev12, 2)), text_color=ev12 >= 0.0 ? color.lime : color.red, bgcolor=color.navy, text_size=size.small)
+    table.cell(tbl, 0, 4, "EV 1:3",     text_color=color.white,  bgcolor=color.navy, text_size=size.small)
+    table.cell(tbl, 1, 4, str.tostring(math.round(ev13, 2)), text_color=ev13 >= 0.0 ? color.lime : color.red, bgcolor=color.navy, text_size=size.small)
+    table.cell(tbl, 0, 5, "Best RR",    text_color=color.white,  bgcolor=color.navy, text_size=size.small)
+    table.cell(tbl, 1, 5, bestRR,       text_color=color.yellow, bgcolor=color.navy, text_size=size.small)
+
+// -- DEBUG TABLE --------------------------------------------------------------
+var table dbg = table.new(position.top_left, 2, 3, border_width=1)
+
+if i_debug
+    rCount = array.size(rBoxes)
+    gCount = array.size(gBoxes)
+    table.cell(dbg, 0, 0, "DEBUG ZONES",    text_color=color.white, bgcolor=color.gray,   text_size=size.small)
+    table.cell(dbg, 1, 0, "",               text_color=color.white, bgcolor=color.gray,   text_size=size.small)
+    table.cell(dbg, 0, 1, "Rojas activas",  text_color=color.white, bgcolor=color.maroon, text_size=size.small)
+    table.cell(dbg, 1, 1, str.tostring(rCount) + " / " + str.tostring(MAX_Z), text_color=rCount >= MAX_Z ? color.yellow : color.white, bgcolor=color.maroon, text_size=size.small)
+    table.cell(dbg, 0, 2, "Verdes activas", text_color=color.white, bgcolor=color.teal,   text_size=size.small)
+    table.cell(dbg, 1, 2, str.tostring(gCount) + " / " + str.tostring(MAX_Z), text_color=gCount >= MAX_Z ? color.yellow : color.white, bgcolor=color.teal,   text_size=size.small)
 
 // -- VISUALS ------------------------------------------------------------------
 plotshape(bearEntry, "Sell", shape.labeldown, location.abovebar, color.red,   text="SELL NOW", textcolor=color.white)
