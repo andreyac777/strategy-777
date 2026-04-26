@@ -4,27 +4,11 @@
     "type": "split",
     "children": [
       {
-        "id": "11846807fdcbb941",
+        "id": "6af909160a8444d4",
         "type": "tabs",
         "children": [
           {
-            "id": "e81ccdef8bc07189",
-            "type": "leaf",
-            "state": {
-              "type": "empty",
-              "state": {},
-              "icon": "lucide-file",
-              "title": "New tab"
-            }
-          }
-        ]
-      },
-      {
-        "id": "cd1d62544c00c5bb",
-        "type": "tabs",
-        "children": [
-          {
-            "id": "4556886b7b0aafee",
+            "id": "47f5a020d7b89cf1",
             "type": "leaf",
             "state": {
               "type": "graph",
@@ -192,8 +176,9 @@
       "bases:Create new base": false
     }
   },
-  "active": "e81ccdef8bc07189",
+  "active": "47f5a020d7b89cf1",
   "lastOpenFiles": [
+    "main-strategy.md",
     "Welcome.md",
     "claude/tokenOptimization.md",
     "claude/shipChecklist.md",
@@ -214,7 +199,6 @@
     "indicators/trendlines.md",
     "indicators/holo.md",
     "indicators/accScalping.md",
-    "indicators",
-    "main-strategy.md"
+    "indicators"
   ]
 }

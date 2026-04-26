@@ -1,5 +1,5 @@
 //@version=6
-strategy("Scalping ACC", overlay=true, default_qty_type=strategy.fixed, default_qty_value=1, process_orders_on_close=true)
+strategy("Scalping ACC", overlay=true, default_qty_type=strategy.fixed, default_qty_value=1, process_orders_on_close=true, max_lines_count=500, max_boxes_count=500)
 
 // -- INPUTS -------------------------------------------------------------------
 i_minBreak      = input.float(2.0,    "Min Breakout (pips)")
@@ -7,9 +7,12 @@ i_minCandlePips = input.float(60.0,  "Min Break Candle (pips)",  tooltip="Tamano
 i_minPrevPips   = input.float(60.0,  "Min Prev Candle (pips)",   tooltip="Tamano minimo de la vela anterior al rompimiento")
 i_extraSL       = input.float(2.0,    "Extra SL (pips)")
 i_rr            = input.float(2.0,    "RR Ratio", step=0.5)
+i_maxTPDist     = input.float(160.0, "Max Zone SL (pips)", minval=0, tooltip="Si la distancia de la entrada al borde de la caja supera este valor, SL y TP se fijan en este limite con RR 1:1. 0 = sin limite")
 i_pip           = input.float(1, "Pip Size")
 i_cooldown      = input.int(5,     "Bars Until New Entry", minval=1)
 i_postTrade     = input.int(4,     "Bars After SL/TP",    minval=0)
+i_minDistR      = input.float(40,   "Min Between Red Boxes (pips)",   minval=0, tooltip="Distancia minima en pips entre midpoints de cajas rojas activas. 0 = sin filtro")
+i_minDistG      = input.float(40,   "Min Between Green Boxes (pips)", minval=0, tooltip="Distancia minima en pips entre midpoints de cajas verdes activas. 0 = sin filtro")
 i_sesStart      = input.int(7,   "Session Start (hour)", minval=0, maxval=23, tooltip="Hora de inicio en tu horario local")
 i_sesEnd        = input.int(12,  "Session End   (hour)", minval=0, maxval=23, tooltip="Hora de cierre en tu horario local")
 i_utcOffset     = input.int(-6,  "UTC Offset",           minval=-12, maxval=14, tooltip="Diferencia con UTC. Colombia = -6 | Nueva York EDT = -4 | Londres GMT = 0")
@@ -29,10 +32,12 @@ _bBot1 = math.min(open[1], close[1])
 var rBoxes = array.new_box(0)
 var rTops  = array.new_float(0)
 var rBots  = array.new_float(0)
+var rMids  = array.new_line(0)
 
 var gBoxes = array.new_box(0)
 var gTops  = array.new_float(0)
 var gBots  = array.new_float(0)
+var gMids  = array.new_line(0)
 
 // Candle (h,l) toca zona (t,b)?
 f_touch(h, l, t, b) => h >= b and l <= t
@@ -49,6 +54,7 @@ if array.size(rBoxes) > 0
     dead_r = array.new_bool(0)
     for i = 0 to array.size(rBoxes) - 1
         box.set_right(array.get(rBoxes, i), bar_index)
+        line.set_x2(array.get(rMids, i), bar_index)
         array.push(dead_r, _green and close > array.get(rTops, i) and not prevBearSetup)
     off = 0
     for i = 0 to array.size(dead_r) - 1
@@ -57,6 +63,7 @@ if array.size(rBoxes) > 0
             array.remove(rBoxes, j)
             array.remove(rTops,  j)
             array.remove(rBots,  j)
+            array.remove(rMids,  j)
             off := off + 1
 
 // Verdes: mueren si vela roja cierra bajo el piso
@@ -64,6 +71,7 @@ if array.size(gBoxes) > 0
     dead_g = array.new_bool(0)
     for i = 0 to array.size(gBoxes) - 1
         box.set_right(array.get(gBoxes, i), bar_index)
+        line.set_x2(array.get(gMids, i), bar_index)
         array.push(dead_g, _red and close < array.get(gBots, i) and not prevBullSetup)
     off = 0
     for i = 0 to array.size(dead_g) - 1
@@ -72,6 +80,7 @@ if array.size(gBoxes) > 0
             array.remove(gBoxes, j)
             array.remove(gTops,  j)
             array.remove(gBots,  j)
+            array.remove(gMids,  j)
             off := off + 1
 
 // -- ZONE DETECTION -----------------------------------------------------------
@@ -80,24 +89,32 @@ _prevPips   = (high[1] - low[1]) / i_pip
 _bearBreak  = (_bBot1 - close)   / i_pip
 _bullBreak  = (close - _bTop1)   / i_pip
 
-// Par bloqueado si toca cualquier zona activa (evaluado despues de deactivaciones)
-_blocked = false
+// Caja roja bloquea nuevas cajas rojas; caja verde bloquea nuevas cajas verdes
+// minDistR: techo nueva caja roja vs piso caja roja existente (hueco entre ellas)
+// minDistG: piso nueva caja verde vs techo caja verde existente (hueco entre ellas)
+_rBlocked = false
 if array.size(rBoxes) > 0
+    _potTopR = math.max(high, high[1])
     for i = 0 to array.size(rBoxes) - 1
         if f_touch(high, low, array.get(rTops,i), array.get(rBots,i)) or
-           f_touch(high[1], low[1], array.get(rTops,i), array.get(rBots,i))
-            _blocked := true
+           f_touch(high[1], low[1], array.get(rTops,i), array.get(rBots,i)) or
+           (i_minDistR > 0 and math.abs(_potTopR - array.get(rBots, i)) / i_pip < i_minDistR)
+            _rBlocked := true
             break
-if not _blocked and array.size(gBoxes) > 0
+
+_gBlocked = false
+if array.size(gBoxes) > 0
+    _potBotG = math.min(low, low[1])
     for i = 0 to array.size(gBoxes) - 1
         if f_touch(high, low, array.get(gTops,i), array.get(gBots,i)) or
-           f_touch(high[1], low[1], array.get(gTops,i), array.get(gBots,i))
-            _blocked := true
+           f_touch(high[1], low[1], array.get(gTops,i), array.get(gBots,i)) or
+           (i_minDistG > 0 and math.abs(_potBotG - array.get(gTops, i)) / i_pip < i_minDistG)
+            _gBlocked := true
             break
 
 _sizeOk   = _candlePips >= i_minCandlePips and _prevPips >= i_minPrevPips
-bearSetup = _red   and _green[1] and close < _bBot1 and _bearBreak >= i_minBreak and _sizeOk and not _blocked
-bullSetup = _green and _red[1]   and close > _bTop1 and _bullBreak >= i_minBreak and _sizeOk and not _blocked
+bearSetup = _red   and _green[1] and close < _bBot1 and _bearBreak >= i_minBreak and _sizeOk and not _rBlocked
+bullSetup = _green and _red[1]   and close > _bTop1 and _bullBreak >= i_minBreak and _sizeOk and not _gBlocked
 
 // Guardar para el proximo bar (usado en deactivacion)
 prevBearSetup := bearSetup
@@ -109,26 +126,34 @@ if bearSetup
         box.delete(array.remove(rBoxes, 0))
         array.remove(rTops, 0)
         array.remove(rBots, 0)
+        line.delete(array.remove(rMids, 0))
     t  = math.max(high, high[1])
     b  = _bBot1
     bx = box.new(left=bar_index[1], top=t, right=bar_index, bottom=b,
                  border_color=color.red, bgcolor=color.new(color.red, 85))
+    ln = line.new(bar_index[1], (t + b) / 2, bar_index, (t + b) / 2,
+                  color=color.white, style=line.style_dashed, width=1)
     array.push(rBoxes, bx)
     array.push(rTops,  t)
     array.push(rBots,  b)
+    array.push(rMids,  ln)
 
 if bullSetup
     if array.size(gBoxes) >= MAX_Z
         box.delete(array.remove(gBoxes, 0))
         array.remove(gTops, 0)
         array.remove(gBots, 0)
+        line.delete(array.remove(gMids, 0))
     t  = _bTop1
     b  = math.min(low, low[1])
     bx = box.new(left=bar_index[1], top=t, right=bar_index, bottom=b,
                  border_color=color.green, bgcolor=color.new(color.green, 85))
+    ln = line.new(bar_index[1], (t + b) / 2, bar_index, (t + b) / 2,
+                  color=color.white, style=line.style_dashed, width=1)
     array.push(gBoxes, bx)
     array.push(gTops,  t)
     array.push(gBots,  b)
+    array.push(gMids,  ln)
 
 // -- TRADE TRACKING -----------------------------------------------------------
 var bool trActive    = false
@@ -169,51 +194,59 @@ bearEntry = bearSetup[1] and _cooldownOk and _postTradeOk and _inSession
 bullEntry = bullSetup[1] and _cooldownOk and _postTradeOk and _inSession
 
 if bearEntry and strategy.position_size == 0
-    slDist  = (high[1] - low[1]) + i_extraSL * i_pip
-    eRef    = _bBot1   // cuerpo inferior de la vela roja de rompimiento
-    slPrice = eRef + slDist
-    tpPrice = eRef - slDist * i_rr
-    strategy.entry("Sell", strategy.short)
-    strategy.exit("SX", "Sell", stop=slPrice, limit=tpPrice)
+    zoneTop    = math.max(high[1], high[2])        // borde superior de la caja roja
+    eRef       = _bBot1                            // cuerpo inferior de la vela roja
+    rawSlDist  = zoneTop - eRef                    // distancia entrada-zona sin extraSL
+    _cappedS   = i_maxTPDist > 0 and rawSlDist / i_pip > i_maxTPDist
+    slPrice    = _cappedS ? eRef + i_maxTPDist * i_pip : zoneTop + i_extraSL * i_pip
+    slDist     = slPrice - eRef
+    tpDist     = _cappedS ? slDist : slDist * i_rr
+    tpPrice    = eRef - tpDist
+    strategy.entry("Sell", strategy.short, comment="Short")
+    strategy.exit("SX", "Sell", stop=slPrice, limit=tpPrice, comment_profit="Stp +1", comment_loss="Ssl -1")
     trRisk        := box.new(bar_index, slPrice, bar_index + 1, eRef,    border_color=color.red,  bgcolor=color.new(color.red,  80))
     trProfit      := box.new(bar_index, eRef,    bar_index + 1, tpPrice, border_color=color.teal, bgcolor=color.new(color.teal, 80))
     trActive      := true
     lastEntryBar  := bar_index
 
 if bullEntry and strategy.position_size == 0
-    slDist  = (high[1] - low[1]) + i_extraSL * i_pip
-    eRef    = _bTop1   // cuerpo superior de la vela verde de rompimiento
-    slPrice = eRef - slDist
-    tpPrice = eRef + slDist * i_rr
-    strategy.entry("Buy", strategy.long)
-    strategy.exit("BX", "Buy", stop=slPrice, limit=tpPrice)
+    zoneBot    = math.min(low[1], low[2])          // borde inferior de la caja verde
+    eRef       = _bTop1                            // cuerpo superior de la vela verde
+    rawSlDist  = eRef - zoneBot                    // distancia entrada-zona sin extraSL
+    _cappedB   = i_maxTPDist > 0 and rawSlDist / i_pip > i_maxTPDist
+    slPrice    = _cappedB ? eRef - i_maxTPDist * i_pip : zoneBot - i_extraSL * i_pip
+    slDist     = eRef - slPrice
+    tpDist     = _cappedB ? slDist : slDist * i_rr
+    tpPrice    = eRef + tpDist
+    strategy.entry("Buy", strategy.long, comment="Long")
+    strategy.exit("BX", "Buy", stop=slPrice, limit=tpPrice, comment_profit="Btp +1", comment_loss="Bsl -1")
     trRisk        := box.new(bar_index, eRef,    bar_index + 1, slPrice, border_color=color.red,  bgcolor=color.new(color.red,  80))
     trProfit      := box.new(bar_index, tpPrice, bar_index + 1, eRef,    border_color=color.teal, bgcolor=color.new(color.teal, 80))
     trActive      := true
     lastEntryBar  := bar_index
 
-// -- RR RECOMMENDATION TABLE --------------------------------------------------
+// -- RR ANALYSIS TABLE (metricas reales, no teoricas) -------------------------
 var table tbl = table.new(position.bottom_right, 2, 6, border_width=1)
 
 if true
-    nTotal = nWins + nLosses
-    wr     = nTotal > 0 ? nWins / nTotal : 0.0
-    ev11   = wr * 1.0 - (1.0 - wr) * 1.0
-    ev12   = wr * 2.0 - (1.0 - wr) * 1.0
-    ev13   = wr * 3.0 - (1.0 - wr) * 1.0
-    bestRR = ev13 >= ev12 and ev13 >= ev11 ? "1:3" : ev12 >= ev11 ? "1:2" : "1:1"
-    table.cell(tbl, 0, 0, "RR ANALYSIS", text_color=color.white,  bgcolor=color.gray, text_size=size.small)
+    nTotal  = nWins + nLosses
+    wr      = nTotal > 0 ? nWins / nTotal : 0.0
+    avgWin  = strategy.wintrades  > 0 ? strategy.grossprofit         / strategy.wintrades  : 0.0
+    avgLoss = strategy.losstrades > 0 ? math.abs(strategy.grossloss) / strategy.losstrades : 0.0
+    actRR   = avgLoss > 0 ? avgWin / avgLoss : 0.0
+    actEV   = wr * actRR - (1.0 - wr) * 1.0
+    table.cell(tbl, 0, 0, "RR ANALYSIS",  text_color=color.white,  bgcolor=color.gray,  text_size=size.small)
     table.cell(tbl, 1, 0, str.tostring(nWins) + "W / " + str.tostring(nLosses) + "L", text_color=color.white, bgcolor=color.gray, text_size=size.small)
-    table.cell(tbl, 0, 1, "Win Rate",    text_color=color.white,  bgcolor=color.navy, text_size=size.small)
+    table.cell(tbl, 0, 1, "Win Rate",     text_color=color.white,  bgcolor=color.navy,  text_size=size.small)
     table.cell(tbl, 1, 1, str.tostring(math.round(wr * 100.0, 1)) + "%", text_color=color.white, bgcolor=color.navy, text_size=size.small)
-    table.cell(tbl, 0, 2, "EV 1:1",     text_color=color.white,  bgcolor=color.navy, text_size=size.small)
-    table.cell(tbl, 1, 2, str.tostring(math.round(ev11, 2)), text_color=ev11 >= 0.0 ? color.lime : color.red, bgcolor=color.navy, text_size=size.small)
-    table.cell(tbl, 0, 3, "EV 1:2",     text_color=color.white,  bgcolor=color.navy, text_size=size.small)
-    table.cell(tbl, 1, 3, str.tostring(math.round(ev12, 2)), text_color=ev12 >= 0.0 ? color.lime : color.red, bgcolor=color.navy, text_size=size.small)
-    table.cell(tbl, 0, 4, "EV 1:3",     text_color=color.white,  bgcolor=color.navy, text_size=size.small)
-    table.cell(tbl, 1, 4, str.tostring(math.round(ev13, 2)), text_color=ev13 >= 0.0 ? color.lime : color.red, bgcolor=color.navy, text_size=size.small)
-    table.cell(tbl, 0, 5, "Best RR",    text_color=color.white,  bgcolor=color.navy, text_size=size.small)
-    table.cell(tbl, 1, 5, bestRR,       text_color=color.yellow, bgcolor=color.navy, text_size=size.small)
+    table.cell(tbl, 0, 2, "Avg Win",      text_color=color.white,  bgcolor=color.navy,  text_size=size.small)
+    table.cell(tbl, 1, 2, str.tostring(math.round(avgWin,  2)), text_color=color.lime,   bgcolor=color.navy, text_size=size.small)
+    table.cell(tbl, 0, 3, "Avg Loss",     text_color=color.white,  bgcolor=color.navy,  text_size=size.small)
+    table.cell(tbl, 1, 3, str.tostring(math.round(avgLoss, 2)), text_color=color.red,    bgcolor=color.navy, text_size=size.small)
+    table.cell(tbl, 0, 4, "Actual RR",    text_color=color.white,  bgcolor=color.navy,  text_size=size.small)
+    table.cell(tbl, 1, 4, "1:" + str.tostring(math.round(actRR, 2)), text_color=color.yellow, bgcolor=color.navy, text_size=size.small)
+    table.cell(tbl, 0, 5, "EV (actual)",  text_color=color.white,  bgcolor=color.navy,  text_size=size.small)
+    table.cell(tbl, 1, 5, str.tostring(math.round(actEV, 2)), text_color=actEV >= 0.0 ? color.lime : color.red, bgcolor=color.navy, text_size=size.small)
 
 // -- DEBUG TABLE --------------------------------------------------------------
 var table dbg = table.new(position.top_right, 2, 3, border_width=1)
@@ -229,5 +262,5 @@ if i_debug
     table.cell(dbg, 1, 2, str.tostring(gCount) + " / " + str.tostring(MAX_Z), text_color=gCount >= MAX_Z ? color.yellow : color.white, bgcolor=color.teal,   text_size=size.small)
 
 // -- VISUALS ------------------------------------------------------------------
-plotshape(bearEntry, "Sell", shape.labeldown, location.abovebar, color.red,   text="SELL NOW", textcolor=color.white)
+plotshape(bearEntry, "Sell", shape.labeldown, location.abovebar, #CC0099,     text="SELL NOW", textcolor=color.white)
 plotshape(bullEntry, "Buy",  shape.labelup,   location.belowbar, color.green, text="BUY NOW",  textcolor=color.white)

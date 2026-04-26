@@ -5,9 +5,52 @@
   "showAttachments": false,
   "hideUnresolved": false,
   "showOrphans": true,
-  "collapse-color-groups": true,
-  "colorGroups": [],
-  "collapse-display": true,
+  "collapse-color-groups": false,
+  "colorGroups": [
+    {
+      "query": "file:pandora",
+      "color": {
+        "a": 1,
+        "rgb": 0
+      }
+    },
+    {
+      "query": "path:indicators  ",
+      "color": {
+        "a": 1,
+        "rgb": 3855602
+      }
+    },
+    {
+      "query": "file:main-strategy",
+      "color": {
+        "a": 1,
+        "rgb": 12014162
+      }
+    },
+    {
+      "query": "path:strategy  ",
+      "color": {
+        "a": 1,
+        "rgb": 857336
+      }
+    },
+    {
+      "query": "path:claude  ",
+      "color": {
+        "a": 1,
+        "rgb": 16309546
+      }
+    },
+    {
+      "query": "path:reference  ",
+      "color": {
+        "a": 1,
+        "rgb": 2422094
+      }
+    }
+  ],
+  "collapse-display": false,
   "showArrow": false,
   "textFadeMultiplier": 0,
   "nodeSizeMultiplier": 1,
