@@ -1,0 +1,135 @@
+//@version=6
+indicator("Trendlines", "TL", overlay=true,
+          max_lines_count=20, max_labels_count=10)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// CONCEPTO
+//   Para resistencia: de todos los pivotes altos recientes, busca el par
+//   de puntos que forma la línea con MÁS TOQUES de otros pivotes (mejor fit).
+//   Lo mismo para soporte con los pivotes bajos.
+//   Resultado: 1 resistencia + 1 soporte, extendidas a la derecha.
+// ══════════════════════════════════════════════════════════════════════════════
+
+grpPiv    = "🔍 Pivotes"
+pivPeriod = input.int(10, "Período del pivote",  minval=3, maxval=50, group=grpPiv,
+                      tooltip="Barras a cada lado para confirmar un máximo/mínimo estructural")
+nPivots   = input.int(10, "Pivotes a analizar",  minval=4, maxval=12, group=grpPiv,
+                      tooltip="Cuántos pivotes recientes se evalúan para encontrar la línea con más coincidencias")
+
+grpVis    = "💎 Visual"
+atrMult   = input.float(0.5, "Tolerancia de toque (× ATR)", minval=0.1, maxval=2.0, step=0.1, group=grpVis,
+                        tooltip="Cuánto puede desviarse un pivote de la línea para considerarse un toque válido")
+colH      = input.color(#00bfff, "Color resistencia",  group=grpVis)
+colL      = input.color(#ff5252, "Color soporte",      group=grpVis)
+lineW     = input.int(2, "Grosor",                     minval=1, maxval=4, group=grpVis)
+showMarks = input.bool(true, "Marcadores de pivote",   group=grpVis)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// DETECCIÓN DE PIVOTES
+// ══════════════════════════════════════════════════════════════════════════════
+pivH   = ta.pivothigh(high, pivPeriod, pivPeriod)
+pivL   = ta.pivotlow(low,   pivPeriod, pivPeriod)
+atrVal = ta.atr(14)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ALMACENAMIENTO  (12 slots fijos; los más recientes están al final)
+// ══════════════════════════════════════════════════════════════════════════════
+var int[]   pH_b = array.new_int(12,   int(na))
+var float[] pH_v = array.new_float(12, float(na))
+var int[]   pL_b = array.new_int(12,   int(na))
+var float[] pL_v = array.new_float(12, float(na))
+
+var line tlH = na
+var line tlL = na
+
+// ══════════════════════════════════════════════════════════════════════════════
+// FUNCIONES
+// ══════════════════════════════════════════════════════════════════════════════
+f_push(int[] bars, float[] vals, int b, float v) =>
+    array.shift(bars)
+    array.push(bars, b)
+    array.shift(vals)
+    array.push(vals, v)
+
+// Encuentra el par de pivotes cuya línea toca más puntos del array.
+// Devuelve [b1, v1, b2, v2] del par ganador (b1 < b2 cronológicamente).
+f_bestFit(int[] bars, float[] vals, float tol) =>
+    N    = 12
+    from = N - nPivots      // sólo los últimos nPivots
+    bestB1    = int(na)
+    bestV1    = float(na)
+    bestB2    = int(na)
+    bestV2    = float(na)
+    bestScore = -1
+
+    for i = from to N - 2
+        bi = array.get(bars, i)
+        vi = array.get(vals, i)
+        if na(bi)
+            continue
+        for j = i + 1 to N - 1
+            bj = array.get(bars, j)
+            vj = array.get(vals, j)
+            if na(bj) or bi == bj
+                continue
+            slope = (vj - vi) / float(bj - bi)
+            score = 0
+            for k = from to N - 1
+                bk = array.get(bars, k)
+                vk = array.get(vals, k)
+                if na(bk)
+                    continue
+                lineY = vi + slope * float(bk - bi)
+                if math.abs(vk - lineY) <= tol
+                    score += 1
+            // Desempate: preferir el par más reciente
+            isNewer = bj > bestB2 or na(bestB2)
+            if score > bestScore or (score == bestScore and isNewer)
+                bestScore := score
+                bestB1    := bi
+                bestV1    := vi
+                bestB2    := bj
+                bestV2    := vj
+
+    [bestB1, bestV1, bestB2, bestV2]
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ACTUALIZACIÓN — recalcula sólo al llegar un nuevo pivote
+// ══════════════════════════════════════════════════════════════════════════════
+if not na(pivH)
+    f_push(pH_b, pH_v, bar_index - pivPeriod, pivH)
+    [b1, v1, b2, v2] = f_bestFit(pH_b, pH_v, atrVal * atrMult)
+    if not na(b1)
+        line.delete(tlH)
+        tlH := line.new(b1, v1, b2, v2,
+                        color=colH, width=lineW, extend=extend.right)
+
+if not na(pivL)
+    f_push(pL_b, pL_v, bar_index - pivPeriod, pivL)
+    [b1, v1, b2, v2] = f_bestFit(pL_b, pL_v, atrVal * atrMult)
+    if not na(b1)
+        line.delete(tlL)
+        tlL := line.new(b1, v1, b2, v2,
+                        color=colL, width=lineW, extend=extend.right)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// MARCADORES DE PIVOTE
+// ══════════════════════════════════════════════════════════════════════════════
+plotshape(showMarks and not na(pivH),
+          "Alto", location=location.abovebar,
+          color=colH, style=shape.triangledown, size=size.tiny,
+          offset=-pivPeriod)
+plotshape(showMarks and not na(pivL),
+          "Bajo", location=location.belowbar,
+          color=colL, style=shape.triangleup, size=size.tiny,
+          offset=-pivPeriod)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ALERTAS
+// ══════════════════════════════════════════════════════════════════════════════
+alertcondition(not na(pivH),
+               "Nuevo máximo estructural",
+               "TL: Nuevo techo confirmado — trendline de resistencia actualizado")
+alertcondition(not na(pivL),
+               "Nuevo mínimo estructural",
+               "TL: Nuevo piso confirmado — trendline de soporte actualizado")

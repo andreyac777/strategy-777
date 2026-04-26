@@ -8,7 +8,7 @@ Ejecuta los siguientes pasos en orden para validar y entregar la estrategia Pine
 
 ## 2. Validar criterios de aceptacion
 
-Lee `skills/06_acceptance_criteria.md` y verifica que el script cumpla:
+Lee `reference/acceptanceCriteria.md` y verifica que el script cumpla:
 
 - [ ] Es tipo `strategy`, no `indicator`
 - [ ] Genera entradas y salidas (long/short)
@@ -21,7 +21,7 @@ Lee `skills/06_acceptance_criteria.md` y verifica que el script cumpla:
 
 ## 3. Validar reglas Pine Script
 
-Lee `skills/10_pinescript_syntax_rules.md` y verifica:
+Lee `reference/pineScriptSyntax.md` y verifica:
 
 - [ ] //@version=5 es la linea 1 absoluta del archivo
 - [ ] strategy() tiene el primer parametro en la misma linea que el parentesis
@@ -62,7 +62,7 @@ Observaciones:
 
 Si todo esta en orden:
 
-- Agrega los archivos `.pine` y `skills/` relevantes al staging
+- Agrega los archivos `.pine` y los `.md` relevantes al staging
 - Nunca agregar `.env`, archivos temporales ni binarios
 - Crea el commit con el formato:
 
