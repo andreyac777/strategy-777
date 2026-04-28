@@ -127,6 +127,41 @@ LC_ALL=C grep -n '[^ -~]' archivo.pine
 
 ---
 
+## REGLA 8 — Asignar siempre el retorno de `label.new()` y `line.new()`
+
+> [!danger] Incorrecto — CE10144 "missing a local code block"
+> ```pine
+> if condition
+>     line.new(...)
+>     label.new(...)
+>
+> if next_condition   // error: Pine ve el if anterior como expresion sin cerrar
+>     ...
+> ```
+
+> [!success] Correcto
+> ```pine
+> if condition
+>     _sl = line.new(...)
+>     _lb = label.new(...)
+>
+> if next_condition   // ok
+>     ...
+> ```
+
+> [!warning] Por que ocurre
+> Pine Script trata el ultimo statement de un bloque `if` como el valor de retorno del bloque.
+> Si ese valor es un objeto (`label`, `line`, `box`), el parser deja el bloque "abierto"
+> y el siguiente `if` al mismo nivel queda sin cuerpo.
+> La asignacion a una variable local cierra el bloque explicitamente.
+
+**Verificar con:**
+```bash
+grep -n "label.new\|line.new\|box.new" archivo.pine | grep -v "^\s*[a-z_]*\s*="
+```
+
+---
+
 ## Checklist de Entrega
 
 > [!todo] Verificar antes de cada commit
@@ -139,6 +174,28 @@ LC_ALL=C grep -n '[^ -~]' archivo.pine
 
 ---
 
+## REGLA 9 — Límites máximos de `strategy()`
+
+> [!danger] CE10178 — valor mayor al máximo permitido
+> ```pine
+> // Incorrecto
+> strategy("...", max_lines_count=1000, max_boxes_count=1000, max_labels_count=1000)
+> ```
+
+> [!success] Correcto — topes máximos en Pine Script v6
+> ```pine
+> strategy("...", max_lines_count=500, max_boxes_count=500, max_labels_count=500)
+> ```
+
+> [!warning] Límites fijos (no configurables)
+> | Parámetro | Máximo |
+> |-----------|--------|
+> | `max_lines_count` | 500 |
+> | `max_boxes_count` | 500 |
+> | `max_labels_count` | 500 |
+
+---
+
 ## Referencia de Errores
 
 | Error | Causa probable |
@@ -147,3 +204,4 @@ LC_ALL=C grep -n '[^ -~]' archivo.pine
 | `Undeclared identifier '_nombre'` | Variable renombrada pero referencia antigua en otra sección |
 | `Cannot call 'strategy.entry' in local scope` | `strategy.entry()` dentro de una función |
 | `Loop is too long` | For loop con demasiados elementos en tiempo real |
+| `max_lines_count value (N) is greater than the maximum possible value (500)` (CE10178) | `max_lines_count`, `max_boxes_count` o `max_labels_count` con valor > 500 |

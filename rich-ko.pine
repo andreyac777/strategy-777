@@ -1,0 +1,455 @@
+//@version=6
+strategy("Rich KO", overlay=true, default_qty_type=strategy.fixed, default_qty_value=1,
+         process_orders_on_close=true, max_lines_count=500, max_boxes_count=500, max_labels_count=500)
+
+// -- INPUTS -------------------------------------------------------------------
+i_pip       = input.float(1.0,  "Pip Size")
+i_utcOffset = input.int(-6,  "UTC Offset",              minval=-12, maxval=14,  group="Sessions", tooltip="Colombia = -6 | Nueva York EST = -5 | Londres GMT = 0")
+i_ctxStart  = input.int(2,   "Context Start (hora local)", minval=0, maxval=23, group="Sessions", tooltip="Inicio de London = inicio del contexto")
+i_nyStart   = input.int(8,   "NY Start = Context Close",   minval=0, maxval=23, group="Sessions")
+i_nyEndHour = input.int(16,  "NY End Hora  (local)",       minval=0, maxval=23, group="Sessions")
+i_nyEndMin  = input.int(0,   "NY End Minuto",              minval=0, maxval=59, group="Sessions")
+i_showLabels = input.bool(true, "Mostrar etiquetas de sesion", group="Sessions")
+i_showVP   = input.bool(true,  "Mostrar Volume Profile",      group="Volume Profile")
+i_vpLevels = input.int(15,    "Niveles",  minval=5, maxval=30, group="Volume Profile")
+i_vpWidth  = input.int(15,    "Ancho max (barras)", minval=3, maxval=40, group="Volume Profile")
+i_fvgMin    = input.float(3.0,  "FVG Min Size (pips)",        group="FVG / OB")
+
+// -- SESIONES -----------------------------------------------------------------
+_utcHour    = math.floor(time / 3600000) % 24
+_localHour  = (_utcHour + i_utcOffset + 24) % 24
+_inCtx      = _localHour >= i_ctxStart and _localHour < i_nyStart
+_inNY       = _localHour >= i_nyStart  and _localHour < i_nyEndHour
+
+// -- CONTEXT HIGH / LOW (LH y LL se forman solo dentro del contexto) ----------
+var float _runHigh    = na
+var float _runLow     = na
+var int   _runHighBar = na
+var int   _runLowBar  = na
+var bool  _wasInCtx   = false
+
+if _inCtx
+    if na(_runHigh) or high > _runHigh
+        _runHigh    := high
+        _runHighBar := bar_index
+    if na(_runLow) or low < _runLow
+        _runLow    := low
+        _runLowBar := bar_index
+
+var float lhLevel = na
+var float llLevel = na
+var int   lhBar   = na
+var int   llBar   = na
+
+if _wasInCtx and not _inCtx
+    lhLevel     := _runHigh
+    llLevel     := _runLow
+    lhBar       := _runHighBar
+    llBar       := _runLowBar
+    _runHigh    := na
+    _runLow     := na
+    _runHighBar := na
+    _runLowBar  := na
+
+_wasInCtx := _inCtx
+
+// -- VOLUME PROFILE - almacenamiento de barras de Context ---------------------
+var int     ctxOpenBarIdx = na
+var float[] ctxBarH       = array.new_float(0)
+var float[] ctxBarL       = array.new_float(0)
+var float[] ctxBarV       = array.new_float(0)
+
+// -- VOLUME PROFILE - recoleccion de barras Context ---------------------------
+if _inCtx and not _inCtx[1]
+    ctxOpenBarIdx := bar_index
+    array.clear(ctxBarH)
+    array.clear(ctxBarL)
+    array.clear(ctxBarV)
+
+if _inCtx
+    array.push(ctxBarH, high)
+    array.push(ctxBarL, low)
+    array.push(ctxBarV, volume)
+
+// -- SESSION BOUNDARY FLAGS ---------------------------------------------------
+_ctxOpen  = _inCtx and not _inCtx[1]
+_ctxClose = not _inCtx and _inCtx[1]
+_nyOpen   = _inNY  and not _inNY[1]
+
+// _nyClose: valida contra el cierre del bar (time_close) con precision de minutos.
+// Dispara en el bar cuyo cierre alcanza i_nyEndHour:i_nyEndMin, no en el siguiente.
+_localMin       = math.floor(time       / 60000) % 60
+_utcCloseHour   = math.floor(time_close / 3600000) % 24
+_localCloseHour = (_utcCloseHour + i_utcOffset + 24) % 24
+_localCloseMin  = math.floor(time_close / 60000) % 60
+_nyEndMinutes   = i_nyEndHour * 60 + i_nyEndMin
+_nyClose        = (_localCloseHour * 60 + _localCloseMin) >= _nyEndMinutes
+             and (_localHour       * 60 + _localMin)      <  _nyEndMinutes
+
+_lineTop = high * 3
+_lineBot = low  / 3
+
+// -- SESSION BANDS (fijas en tiempo, altura completa del chart) ---------------
+// Se crean al abrir la sesion y se extienden hasta su cierre.
+// El alto/bajo usa el mismo truco que las lineas de borde (fuera del rango visible).
+var box ctxBox = na
+var box nyBox  = na
+
+if _ctxOpen
+    ctxBox := box.new(bar_index, _lineTop, bar_index, _lineBot,
+                      border_color=color.new(#7B2D8B, 100),
+                      bgcolor=color.new(#7B2D8B, 87))
+
+if _inCtx and not na(ctxBox)
+    box.set_top(ctxBox,    _lineTop)
+    box.set_bottom(ctxBox, _lineBot)
+    box.set_right(ctxBox,  bar_index)
+
+if _nyOpen
+    _nyEndUTC_H = (i_nyEndHour - i_utcOffset + 24) % 24
+    _nyCloseMs  = timestamp("UTC", year(time, "UTC"), month(time, "UTC"),
+                            dayofmonth(time, "UTC"), _nyEndUTC_H, i_nyEndMin)
+    nyBox := box.new(time, _lineTop, _nyCloseMs, _lineBot,
+                     xloc=xloc.bar_time,
+                     border_color=color.new(#00AAAA, 100),
+                     bgcolor=color.new(#00EFEF, 90))
+
+if _inNY and not na(nyBox)
+    box.set_top(nyBox,    _lineTop)
+    box.set_bottom(nyBox, _lineBot)
+
+// -- SESSION BOUNDARY MARKERS -------------------------------------------------
+if _ctxOpen
+    _sl = line.new(bar_index, _lineTop, bar_index, _lineBot, color=color.new(#7B2D8B, 50), style=line.style_dotted, width=1)
+    _lb = i_showLabels ? label.new(bar_index, low, "Context Open",  style=label.style_label_up,   color=color.new(#7B2D8B, 45), textcolor=color.white, size=size.tiny) : na
+
+if _ctxClose
+    _sl = line.new(bar_index, _lineTop, bar_index, _lineBot, color=color.new(#7B2D8B, 50), style=line.style_dotted, width=1)
+    _lb = i_showLabels ? label.new(bar_index, high, "Context Close", style=label.style_label_down, color=color.new(#7B2D8B, 45), textcolor=color.white, size=size.tiny) : na
+
+if _nyOpen
+    _sl = line.new(bar_index, _lineTop, bar_index, _lineBot, color=color.new(#00AAAA, 50), style=line.style_dotted, width=1)
+    _lb = i_showLabels ? label.new(bar_index, low, "NY Open",       style=label.style_label_up,   color=color.new(#00AAAA, 45), textcolor=color.white, size=size.tiny) : na
+
+if _nyClose
+    _sl = line.new(bar_index, _lineTop, bar_index, _lineBot, color=color.new(#00AAAA, 50), style=line.style_dotted, width=1)
+    _lb = i_showLabels ? label.new(bar_index, low, "NY Close",      style=label.style_label_up,   color=color.new(#00AAAA, 45), textcolor=color.white, size=size.tiny) : na
+
+// -- VOLUME PROFILE - calculo y dibujo al cierre de Context -------------------
+if _ctxClose and i_showVP and array.size(ctxBarV) > 0 and not na(lhLevel) and not na(llLevel)
+    _pMin  = llLevel
+    _pMax  = lhLevel
+    _range = _pMax - _pMin
+    if _range > 0
+        _sz   = _range / i_vpLevels
+        _vols = array.new_float(i_vpLevels, 0.0)
+        _nBars = array.size(ctxBarV)
+        for b = 0 to _nBars - 1
+            _bH = array.get(ctxBarH, b)
+            _bL = array.get(ctxBarL, b)
+            _bV = array.get(ctxBarV, b)
+            _bR = _bH - _bL
+            if _bR > 0.0
+                for i = 0 to i_vpLevels - 1
+                    _lL = _pMin + i * _sz
+                    _lH = _lL + _sz
+                    _ov = math.max(0.0, math.min(_bH, _lH) - math.max(_bL, _lL))
+                    array.set(_vols, i, array.get(_vols, i) + _bV * _ov / _bR)
+        _maxV = array.max(_vols)
+        _pocI = array.indexof(_vols, _maxV)
+        if _maxV > 0
+            _maxW = math.min(i_vpWidth, _nBars)
+            for i = 0 to i_vpLevels - 1
+                _lL  = _pMin + i * _sz
+                _lH  = _lL + _sz
+                _pct = array.get(_vols, i) / _maxV
+                _w   = math.max(1, math.round(_pct * _maxW))
+                _col = i == _pocI ? color.new(color.yellow, 45) : color.new(color.gray, 65)
+                _bx  = box.new(ctxOpenBarIdx, _lH, ctxOpenBarIdx + _w, _lL,
+                               border_color=color.new(color.gray, 88),
+                               bgcolor=_col)
+
+// -- FVG + OB ARRAYS ----------------------------------------------------------
+var fvgBoxes = array.new_box(0)
+var fvgMids  = array.new_line(0)
+var fvgTops  = array.new_float(0)
+var fvgBots  = array.new_float(0)
+var fvgBull  = array.new_bool(0)
+
+var obBoxes  = array.new_box(0)
+var obMids   = array.new_line(0)
+var obTops   = array.new_float(0)
+var obBots   = array.new_float(0)
+var obBull   = array.new_bool(0)
+
+MAX_FVG = 8
+MAX_OB  = 8
+
+// -- FVG DETECTION (solo en contexto) -----------------------------------------
+_bullFVGCond = _inCtx and _inCtx[1] and _inCtx[2] and low > high[2]
+_bearFVGCond = _inCtx and _inCtx[1] and _inCtx[2] and high < low[2]
+_bullFVGSize = _bullFVGCond ? (low - high[2]) / i_pip : 0.0
+_bearFVGSize = _bearFVGCond ? (low[2] - high) / i_pip : 0.0
+_newBullFVG  = _bullFVGCond and _bullFVGSize >= i_fvgMin
+_newBearFVG  = _bearFVGCond and _bearFVGSize >= i_fvgMin
+
+if _newBullFVG
+    if array.size(fvgBoxes) >= MAX_FVG
+        box.delete(array.remove(fvgBoxes, 0))
+        line.delete(array.remove(fvgMids,  0))
+        array.remove(fvgTops, 0)
+        array.remove(fvgBots, 0)
+        array.remove(fvgBull, 0)
+    t  = low
+    b  = high[2]
+    bx = box.new(bar_index[2], t, bar_index, b,
+                 border_color=color.new(color.green, 55), bgcolor=color.new(color.green, 78),
+                 text="FVG", text_color=color.new(color.green, 10),
+                 text_halign=text.align_center, text_valign=text.align_center, text_size=size.tiny)
+    ln = line.new(bar_index[2], (t + b) / 2, bar_index, (t + b) / 2,
+                  color=color.new(color.green, 35), style=line.style_dashed, width=1)
+    array.push(fvgBoxes, bx)
+    array.push(fvgMids,  ln)
+    array.push(fvgTops,  t)
+    array.push(fvgBots,  b)
+    array.push(fvgBull,  true)
+
+if _newBearFVG
+    if array.size(fvgBoxes) >= MAX_FVG
+        box.delete(array.remove(fvgBoxes, 0))
+        line.delete(array.remove(fvgMids,  0))
+        array.remove(fvgTops, 0)
+        array.remove(fvgBots, 0)
+        array.remove(fvgBull, 0)
+    t  = low[2]
+    b  = high
+    bx = box.new(bar_index[2], t, bar_index, b,
+                 border_color=color.new(color.red, 55), bgcolor=color.new(color.red, 78),
+                 text="FVG", text_color=color.new(color.red, 10),
+                 text_halign=text.align_center, text_valign=text.align_center, text_size=size.tiny)
+    ln = line.new(bar_index[2], (t + b) / 2, bar_index, (t + b) / 2,
+                  color=color.new(color.red, 35), style=line.style_dashed, width=1)
+    array.push(fvgBoxes, bx)
+    array.push(fvgMids,  ln)
+    array.push(fvgTops,  t)
+    array.push(fvgBots,  b)
+    array.push(fvgBull,  false)
+
+// -- OB DETECTION (solo en contexto) ------------------------------------------
+// Desplazamiento: la mecha de la vela actual supera el high/low anterior
+// (no requiere cierre por encima, basta con que lo toque)
+_dispBull  = _inCtx and _inCtx[1] and close > open and high > high[1]
+_dispBear  = _inCtx and _inCtx[1] and close < open and low  < low[1]
+_newBullOB = _dispBull and close[1] < open[1]
+_newBearOB = _dispBear and close[1] > open[1]
+
+if _newBullOB
+    if array.size(obBoxes) >= MAX_OB
+        box.delete(array.remove(obBoxes, 0))
+        line.delete(array.remove(obMids,  0))
+        array.remove(obTops, 0)
+        array.remove(obBots, 0)
+        array.remove(obBull, 0)
+    t  = math.max(open[1], close[1])
+    b  = math.min(open[1], close[1])
+    bx = box.new(bar_index[1], t, bar_index, b,
+                 border_color=color.new(color.lime, 50), bgcolor=color.new(color.lime, 80),
+                 text="OB", text_color=color.new(color.lime, 5),
+                 text_halign=text.align_center, text_valign=text.align_center, text_size=size.tiny)
+    ln = line.new(bar_index[1], (t + b) / 2, bar_index, (t + b) / 2,
+                  color=color.new(color.lime, 30), style=line.style_dashed, width=1)
+    array.push(obBoxes, bx)
+    array.push(obMids,  ln)
+    array.push(obTops,  t)
+    array.push(obBots,  b)
+    array.push(obBull,  true)
+
+if _newBearOB
+    if array.size(obBoxes) >= MAX_OB
+        box.delete(array.remove(obBoxes, 0))
+        line.delete(array.remove(obMids,  0))
+        array.remove(obTops, 0)
+        array.remove(obBots, 0)
+        array.remove(obBull, 0)
+    t  = math.max(open[1], close[1])
+    b  = math.min(open[1], close[1])
+    bx = box.new(bar_index[1], t, bar_index, b,
+                 border_color=color.new(#FF6600, 50), bgcolor=color.new(#FF6600, 80),
+                 text="OB", text_color=color.new(#FF6600, 5),
+                 text_halign=text.align_center, text_valign=text.align_center, text_size=size.tiny)
+    ln = line.new(bar_index[1], (t + b) / 2, bar_index, (t + b) / 2,
+                  color=color.new(#FF6600, 30), style=line.style_dashed, width=1)
+    array.push(obBoxes, bx)
+    array.push(obMids,  ln)
+    array.push(obTops,  t)
+    array.push(obBots,  b)
+    array.push(obBull,  false)
+
+// -- EXTEND + EXPIRE FVG/OB ---------------------------------------------------
+// Al expirar: se deja de extender (se saca del array de tracking) pero el
+// dibujo permanece en el chart para poder estudiar el historial.
+if array.size(fvgBoxes) > 0
+    _deadFvg = array.new_bool(0)
+    for i = 0 to array.size(fvgBoxes) - 1
+        box.set_right(array.get(fvgBoxes, i), bar_index)
+        line.set_x2(array.get(fvgMids,   i), bar_index)
+        _inv = array.get(fvgBull, i) ? close < array.get(fvgBots, i) : close > array.get(fvgTops, i)
+        array.push(_deadFvg, _inv or _nyClose)
+    _off = 0
+    for i = 0 to array.size(_deadFvg) - 1
+        if array.get(_deadFvg, i)
+            j = i - _off
+            array.remove(fvgBoxes, j)
+            array.remove(fvgMids,  j)
+            array.remove(fvgTops,  j)
+            array.remove(fvgBots,  j)
+            array.remove(fvgBull,  j)
+            _off += 1
+
+if array.size(obBoxes) > 0
+    _deadOb = array.new_bool(0)
+    for i = 0 to array.size(obBoxes) - 1
+        box.set_right(array.get(obBoxes, i), bar_index)
+        line.set_x2(array.get(obMids,   i), bar_index)
+        _inv = array.get(obBull, i) ? close < array.get(obBots, i) : close > array.get(obTops, i)
+        array.push(_deadOb, _inv or _nyClose)
+    _off = 0
+    for i = 0 to array.size(_deadOb) - 1
+        if array.get(_deadOb, i)
+            j = i - _off
+            array.remove(obBoxes, j)
+            array.remove(obMids,  j)
+            array.remove(obTops,  j)
+            array.remove(obBots,  j)
+            array.remove(obBull,  j)
+            _off += 1
+
+// -- LH LINE (white solid) ----------------------------------------------------
+var line  lhLine  = na
+var label lhLabel = na
+var float lhPrev  = na
+var bool  lhAlive = false
+
+_newLH = not na(lhLevel) and (na(lhPrev) or lhLevel != lhPrev)
+
+if _newLH
+    lhLine  := line.new(lhBar, lhLevel, bar_index, lhLevel,
+                        color=color.white, style=line.style_solid, width=1)
+    lhLabel := label.new(math.round((lhBar + bar_index) / 2), lhLevel + 4 * i_pip, "LH",
+                        color=color.new(color.white, 100), textcolor=color.white,
+                        style=label.style_none, size=size.small)
+    lhPrev  := lhLevel
+    lhAlive := true
+
+if lhAlive and not na(lhLine)
+    line.set_x2(lhLine, bar_index)
+    if not na(lhLabel)
+        label.set_x(lhLabel, math.round((lhBar + bar_index) / 2))
+    if high >= lhLevel
+        _lbBreak = label.new(bar_index, lhLevel, "LH Break",
+                             style=label.style_label_down, color=color.new(color.white, 45),
+                             textcolor=color.white, size=size.tiny)
+        lhAlive := false
+    else if _nyClose
+        lhAlive := false
+
+// -- LL LINE (white solid) ----------------------------------------------------
+var line  llLine  = na
+var label llLabel = na
+var float llPrev  = na
+var bool  llAlive = false
+
+_newLL = not na(llLevel) and (na(llPrev) or llLevel != llPrev)
+
+if _newLL
+    llLine  := line.new(llBar, llLevel, bar_index, llLevel,
+                        color=color.white, style=line.style_solid, width=1)
+    llLabel := label.new(math.round((llBar + bar_index) / 2), llLevel + 4 * i_pip, "LL",
+                        color=color.new(color.white, 100), textcolor=color.white,
+                        style=label.style_none, size=size.small)
+    llPrev  := llLevel
+    llAlive := true
+
+if llAlive and not na(llLine)
+    line.set_x2(llLine, bar_index)
+    if not na(llLabel)
+        label.set_x(llLabel, math.round((llBar + bar_index) / 2))
+    if low <= llLevel
+        _lbBreak = label.new(bar_index, llLevel, "LL Break",
+                             style=label.style_label_up, color=color.new(color.white, 45),
+                             textcolor=color.white, size=size.tiny)
+        llAlive := false
+    else if _nyClose
+        llAlive := false
+
+// -- TRACK LONG/SHORT STATS MANUALLY ------------------------------------------
+var int   lW           = 0
+var int   lL           = 0
+var int   sW           = 0
+var int   sL           = 0
+var float lGrossProfit = 0.0
+var float lGrossLoss   = 0.0
+var float sGrossProfit = 0.0
+var float sGrossLoss   = 0.0
+var int   prevClosed   = 0
+
+curClosed = strategy.closedtrades
+if curClosed > prevClosed
+    if curClosed - prevClosed > 0
+        for i = prevClosed to curClosed - 1
+            profit = strategy.closedtrades.profit(i)
+            isLong = strategy.closedtrades.size(i) > 0
+            if isLong
+                if profit > 0
+                    lW           += 1
+                    lGrossProfit += profit
+                else
+                    lL           += 1
+                    lGrossLoss   += math.abs(profit)
+            else
+                if profit > 0
+                    sW           += 1
+                    sGrossProfit += profit
+                else
+                    sL           += 1
+                    sGrossLoss   += math.abs(profit)
+    prevClosed := curClosed
+
+// -- RR TABLE (Longs vs Shorts) -----------------------------------------------
+var table tbl = table.new(position.bottom_right, 3, 7, border_width=1)
+
+if true
+    lTot  = lW + lL
+    sTot  = sW + sL
+    lWR   = lTot > 0 ? lW / lTot : 0.0
+    sWR   = sTot > 0 ? sW / sTot : 0.0
+    lAvgW = lW > 0 ? lGrossProfit / lW : 0.0
+    lAvgL = lL > 0 ? lGrossLoss   / lL : 0.0
+    sAvgW = sW > 0 ? sGrossProfit / sW : 0.0
+    sAvgL = sL > 0 ? sGrossLoss   / sL : 0.0
+    lRR   = lAvgL > 0 ? lAvgW / lAvgL : 0.0
+    sRR   = sAvgL > 0 ? sAvgW / sAvgL : 0.0
+    lEV   = lWR * lRR - (1.0 - lWR)
+    sEV   = sWR * sRR - (1.0 - sWR)
+
+    table.cell(tbl, 0, 0, "RICH KO",  text_color=color.white, bgcolor=color.gray,   text_size=size.small)
+    table.cell(tbl, 1, 0, "LONG",     text_color=color.white, bgcolor=color.teal,   text_size=size.small)
+    table.cell(tbl, 2, 0, "SHORT",    text_color=color.white, bgcolor=color.maroon, text_size=size.small)
+    table.cell(tbl, 0, 1, "W / L",    text_color=color.white, bgcolor=color.navy,   text_size=size.small)
+    table.cell(tbl, 1, 1, str.tostring(lW) + " / " + str.tostring(lL), text_color=color.white, bgcolor=color.navy, text_size=size.small)
+    table.cell(tbl, 2, 1, str.tostring(sW) + " / " + str.tostring(sL), text_color=color.white, bgcolor=color.navy, text_size=size.small)
+    table.cell(tbl, 0, 2, "Win Rate", text_color=color.white, bgcolor=color.navy,   text_size=size.small)
+    table.cell(tbl, 1, 2, str.tostring(math.round(lWR * 100.0, 1)) + "%", text_color=color.white, bgcolor=color.navy, text_size=size.small)
+    table.cell(tbl, 2, 2, str.tostring(math.round(sWR * 100.0, 1)) + "%", text_color=color.white, bgcolor=color.navy, text_size=size.small)
+    table.cell(tbl, 0, 3, "Avg Win",  text_color=color.white, bgcolor=color.navy,   text_size=size.small)
+    table.cell(tbl, 1, 3, str.tostring(math.round(lAvgW, 2)), text_color=color.lime, bgcolor=color.navy, text_size=size.small)
+    table.cell(tbl, 2, 3, str.tostring(math.round(sAvgW, 2)), text_color=color.lime, bgcolor=color.navy, text_size=size.small)
+    table.cell(tbl, 0, 4, "Avg Loss", text_color=color.white, bgcolor=color.navy,   text_size=size.small)
+    table.cell(tbl, 1, 4, str.tostring(math.round(lAvgL, 2)), text_color=color.red,  bgcolor=color.navy, text_size=size.small)
+    table.cell(tbl, 2, 4, str.tostring(math.round(sAvgL, 2)), text_color=color.red,  bgcolor=color.navy, text_size=size.small)
+    table.cell(tbl, 0, 5, "Actual RR", text_color=color.white, bgcolor=color.navy,  text_size=size.small)
+    table.cell(tbl, 1, 5, "1:" + str.tostring(math.round(lRR, 2)), text_color=color.yellow, bgcolor=color.navy, text_size=size.small)
+    table.cell(tbl, 2, 5, "1:" + str.tostring(math.round(sRR, 2)), text_color=color.yellow, bgcolor=color.navy, text_size=size.small)
+    table.cell(tbl, 0, 6, "EV",       text_color=color.white, bgcolor=color.navy,   text_size=size.small)
+    table.cell(tbl, 1, 6, str.tostring(math.round(lEV, 2)), text_color=lEV >= 0.0 ? color.lime : color.red, bgcolor=color.navy, text_size=size.small)
+    table.cell(tbl, 2, 6, str.tostring(math.round(sEV, 2)), text_color=sEV >= 0.0 ? color.lime : color.red, bgcolor=color.navy, text_size=size.small)

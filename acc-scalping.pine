@@ -2,21 +2,40 @@
 strategy("Scalping ACC", overlay=true, default_qty_type=strategy.fixed, default_qty_value=1, process_orders_on_close=true, max_lines_count=500, max_boxes_count=500)
 
 // -- INPUTS -------------------------------------------------------------------
-i_minBreak      = input.float(2.0,    "Min Breakout (pips)")
-i_minCandlePips = input.float(60.0,  "Min Break Candle (pips)",  tooltip="Tamano minimo de la vela que rompe el nivel")
-i_minPrevPips   = input.float(60.0,  "Min Prev Candle (pips)",   tooltip="Tamano minimo de la vela anterior al rompimiento")
+i_minBreak      = input.float(1.0,    "Min Breakout (pips)")
+i_minCandlePips = input.float(5.0,   "Min Break Candle (pips)",  tooltip="Tamano minimo de la vela que rompe el nivel")
+i_minPrevPips   = input.float(5.0,   "Min Prev Candle (pips)",   tooltip="Tamano minimo de la vela anterior al rompimiento")
 i_extraSL       = input.float(2.0,    "Extra SL (pips)")
-i_rr            = input.float(2.0,    "RR Ratio", step=0.5)
+i_rr            = input.float(1.8,    "RR Ratio", step=0.5)
 i_maxTPDist     = input.float(160.0, "Max Zone SL (pips)", minval=0, tooltip="Si la distancia de la entrada al borde de la caja supera este valor, SL y TP se fijan en este limite con RR 1:1. 0 = sin limite")
 i_pip           = input.float(1, "Pip Size")
-i_cooldown      = input.int(5,     "Bars Until New Entry", minval=1)
-i_postTrade     = input.int(4,     "Bars After SL/TP",    minval=0)
-i_minDistR      = input.float(40,   "Min Between Red Boxes (pips)",   minval=0, tooltip="Distancia minima en pips entre midpoints de cajas rojas activas. 0 = sin filtro")
-i_minDistG      = input.float(40,   "Min Between Green Boxes (pips)", minval=0, tooltip="Distancia minima en pips entre midpoints de cajas verdes activas. 0 = sin filtro")
+i_cooldown      = input.int(2,     "Bars Until New Entry", minval=1)
+i_postTrade     = input.int(1,     "Bars After SL/TP",    minval=0)
+i_minDistR      = input.float(10,   "Min Between Red Boxes (pips)",   minval=0, tooltip="Distancia minima en pips entre midpoints de cajas rojas activas. 0 = sin filtro")
+i_minDistG      = input.float(10,   "Min Between Green Boxes (pips)", minval=0, tooltip="Distancia minima en pips entre midpoints de cajas verdes activas. 0 = sin filtro")
 i_sesStart      = input.int(7,   "Session Start (hour)", minval=0, maxval=23, tooltip="Hora de inicio en tu horario local")
-i_sesEnd        = input.int(12,  "Session End   (hour)", minval=0, maxval=23, tooltip="Hora de cierre en tu horario local")
+i_sesEnd        = input.int(17,  "Session End   (hour)", minval=0, maxval=23, tooltip="Hora de cierre en tu horario local")
 i_utcOffset     = input.int(-6,  "UTC Offset",           minval=-12, maxval=14, tooltip="Diferencia con UTC. Colombia = -6 | Nueva York EDT = -4 | Londres GMT = 0")
+i_enableLong    = input.bool(true,  "Habilitar Longs",    group="Direccion")
+i_enableShort   = input.bool(true,  "Habilitar Shorts",   group="Direccion")
+i_enableReject  = input.bool(true,  "Habilitar Rejection", group="Direccion", tooltip="Entra cuando una vela rechaza una zona: wick dentro de la caja, cuerpo fuera")
+i_rejHours      = input.int(1,     "Rejection Zone - Min Horas entre toques", minval=1, maxval=9, group="Direccion", tooltip="Si la zona fue tocada hace menos de este tiempo, se considera debil y no entra")
 i_debug         = input.bool(false, "Debug Zones")
+i_htfFilter     = input.bool(true,   "HTF Trend Filter",   tooltip="Solo entra si el precio esta por encima (Long) o debajo (Short) de la EMA del HTF. Desactivar = sin filtro")
+i_htfTF         = input.timeframe("60", "HTF Timeframe",   tooltip="60=H1  240=H4  D=Diario")
+i_htfLen        = input.int(50,      "HTF EMA Length",      minval=5, maxval=200)
+i_bePips        = input.float(20.0,  "Break-even (pips)",  minval=0, tooltip="Mueve el SL a precio de entrada cuando el trade avanza este valor. 0 = desactivado")
+i_minSlPips     = input.float(5.0,   "Min SL Dist (pips)", minval=1, tooltip="Descarta la entrada si la distancia entrada-SL es menor que este valor. Evita trades P&L cero")
+i_riskUSD       = input.float(60.0,  "Riesgo por trade (USD)", minval=1, tooltip="Perdida maxima fija por operacion. El lote se ajusta automaticamente segun la distancia del SL")
+
+i_ictOn       = input.bool(false, "Activar ICT Sessions + VP",  group="Sesiones ICT")
+i_ctxStart    = input.int(2,  "Context Start (hora local)",     minval=0, maxval=23, group="Sesiones ICT")
+i_nyStart     = input.int(8,  "NY Start / Context Close",       minval=0, maxval=23, group="Sesiones ICT")
+i_nyEndHour   = input.int(16, "NY End Hora (local)",            minval=0, maxval=23, group="Sesiones ICT")
+i_nyEndMin    = input.int(0,  "NY End Minuto",                  minval=0, maxval=59, group="Sesiones ICT")
+i_showSesLbl  = input.bool(true,  "Mostrar etiquetas sesion",   group="Sesiones ICT")
+i_vpLevels    = input.int(30, "VP Niveles",  minval=5, maxval=30, group="Sesiones ICT")
+i_vpWidth     = input.int(15, "VP Ancho (barras)", minval=3, maxval=40, group="Sesiones ICT")
 
 MAX_Z = 10   // slots por color
 
@@ -29,15 +48,36 @@ _bTop1 = math.max(open[1], close[1])
 _bBot1 = math.min(open[1], close[1])
 
 // -- ZONE ARRAYS (hasta 10 rojas + 10 verdes) ---------------------------------
-var rBoxes = array.new_box(0)
-var rTops  = array.new_float(0)
-var rBots  = array.new_float(0)
-var rMids  = array.new_line(0)
+var rBoxes      = array.new_box(0)
+var rTops       = array.new_float(0)
+var rBots       = array.new_float(0)
+var rTopLines   = array.new_line(0)
+var rBotLines   = array.new_line(0)
+var rTopLabels  = array.new_label(0)
+var rBotLabels  = array.new_label(0)
+var rTouchTimes = array.new_float(0)
 
-var gBoxes = array.new_box(0)
-var gTops  = array.new_float(0)
-var gBots  = array.new_float(0)
-var gMids  = array.new_line(0)
+var gBoxes      = array.new_box(0)
+var gTops       = array.new_float(0)
+var gBots       = array.new_float(0)
+var gTopLines   = array.new_line(0)
+var gBotLines   = array.new_line(0)
+var gTopLabels  = array.new_label(0)
+var gBotLabels  = array.new_label(0)
+var gTouchTimes = array.new_float(0)
+
+// ICT sessions + VP state
+var box   ict_ctxBox  = na
+var box   ict_nyBox   = na
+var int   ict_ctxBar  = na
+var float ict_runHi   = na
+var float ict_runLo   = na
+var float ict_lhLevel = na
+var float ict_llLevel = na
+var bool  ict_wasCTX  = false
+var float[] ict_bH    = array.new_float(0)
+var float[] ict_bL    = array.new_float(0)
+var float[] ict_bV    = array.new_float(0)
 
 // Candle (h,l) toca zona (t,b)?
 f_touch(h, l, t, b) => h >= b and l <= t
@@ -53,35 +93,48 @@ var bool prevBullSetup = false
 if array.size(rBoxes) > 0
     dead_r = array.new_bool(0)
     for i = 0 to array.size(rBoxes) - 1
-        box.set_right(array.get(rBoxes, i), bar_index)
-        line.set_x2(array.get(rMids, i), bar_index)
+        line.set_x2(array.get(rTopLines, i), bar_index + 1)
+        line.set_x2(array.get(rBotLines, i), bar_index + 1)
         array.push(dead_r, _green and close > array.get(rTops, i) and not prevBearSetup)
     off = 0
     for i = 0 to array.size(dead_r) - 1
         if array.get(dead_r, i)
             j = i - off
-            array.remove(rBoxes, j)
-            array.remove(rTops,  j)
-            array.remove(rBots,  j)
-            array.remove(rMids,  j)
+            array.remove(rBoxes,      j)
+            array.remove(rTops,       j)
+            array.remove(rBots,       j)
+            array.remove(rTopLines,   j)
+            array.remove(rBotLines,   j)
+            array.remove(rTopLabels,  j)
+            array.remove(rBotLabels,  j)
+            array.remove(rTouchTimes, j)
             off := off + 1
 
 // Verdes: mueren si vela roja cierra bajo el piso
 if array.size(gBoxes) > 0
     dead_g = array.new_bool(0)
     for i = 0 to array.size(gBoxes) - 1
-        box.set_right(array.get(gBoxes, i), bar_index)
-        line.set_x2(array.get(gMids, i), bar_index)
+        line.set_x2(array.get(gTopLines, i), bar_index + 1)
+        line.set_x2(array.get(gBotLines, i), bar_index + 1)
         array.push(dead_g, _red and close < array.get(gBots, i) and not prevBullSetup)
     off = 0
     for i = 0 to array.size(dead_g) - 1
         if array.get(dead_g, i)
             j = i - off
-            array.remove(gBoxes, j)
-            array.remove(gTops,  j)
-            array.remove(gBots,  j)
-            array.remove(gMids,  j)
+            array.remove(gBoxes,      j)
+            array.remove(gTops,       j)
+            array.remove(gBots,       j)
+            array.remove(gTopLines,   j)
+            array.remove(gBotLines,   j)
+            array.remove(gTopLabels,  j)
+            array.remove(gBotLabels,  j)
+            array.remove(gTouchTimes, j)
             off := off + 1
+
+// -- HTF FILTER ---------------------------------------------------------------
+ema_htf    = request.security(syminfo.tickerid, i_htfTF, ta.ema(close, i_htfLen))
+_htfBullOk = not i_htfFilter or close > ema_htf
+_htfBearOk = not i_htfFilter or close < ema_htf
 
 // -- ZONE DETECTION -----------------------------------------------------------
 _candlePips = math.abs(close - open) / i_pip
@@ -124,46 +177,108 @@ prevBullSetup := bullSetup
 if bearSetup
     if array.size(rBoxes) >= MAX_Z
         box.delete(array.remove(rBoxes, 0))
-        array.remove(rTops, 0)
-        array.remove(rBots, 0)
-        line.delete(array.remove(rMids, 0))
+        array.remove(rTops,            0)
+        array.remove(rBots,            0)
+        line.delete(array.remove(rTopLines,  0))
+        line.delete(array.remove(rBotLines,  0))
+        label.delete(array.remove(rTopLabels, 0))
+        label.delete(array.remove(rBotLabels, 0))
+        array.remove(rTouchTimes,      0)
     t  = math.max(high, high[1])
     b  = _bBot1
-    bx = box.new(left=bar_index[1], top=t, right=bar_index, bottom=b,
-                 border_color=color.red, bgcolor=color.new(color.red, 85))
-    ln = line.new(bar_index[1], (t + b) / 2, bar_index, (t + b) / 2,
-                  color=color.white, style=line.style_dashed, width=1)
-    array.push(rBoxes, bx)
-    array.push(rTops,  t)
-    array.push(rBots,  b)
-    array.push(rMids,  ln)
+    bx = box.new(left=bar_index[1], top=t, right=bar_index + 1, bottom=b,
+                 border_color=na, bgcolor=na)
+    lnT = line.new(bar_index[1], t, bar_index + 1, t, color=color.red,   style=line.style_solid, width=1)
+    lnB = line.new(bar_index[1], b, bar_index + 1, b, color=color.red,   style=line.style_solid, width=1)
+    lbT = label.new(bar_index[1], t, "LH", color=na, textcolor=color.red,   style=label.style_none, size=size.small)
+    lbB = label.new(bar_index[1], b, "LL", color=na, textcolor=color.red,   style=label.style_none, size=size.small)
+    array.push(rBoxes,      bx)
+    array.push(rTops,       t)
+    array.push(rBots,       b)
+    array.push(rTopLines,   lnT)
+    array.push(rBotLines,   lnB)
+    array.push(rTopLabels,  lbT)
+    array.push(rBotLabels,  lbB)
+    array.push(rTouchTimes, 0.0)
 
 if bullSetup
     if array.size(gBoxes) >= MAX_Z
         box.delete(array.remove(gBoxes, 0))
-        array.remove(gTops, 0)
-        array.remove(gBots, 0)
-        line.delete(array.remove(gMids, 0))
+        array.remove(gTops,            0)
+        array.remove(gBots,            0)
+        line.delete(array.remove(gTopLines,  0))
+        line.delete(array.remove(gBotLines,  0))
+        label.delete(array.remove(gTopLabels, 0))
+        label.delete(array.remove(gBotLabels, 0))
+        array.remove(gTouchTimes,      0)
     t  = _bTop1
     b  = math.min(low, low[1])
-    bx = box.new(left=bar_index[1], top=t, right=bar_index, bottom=b,
-                 border_color=color.green, bgcolor=color.new(color.green, 85))
-    ln = line.new(bar_index[1], (t + b) / 2, bar_index, (t + b) / 2,
-                  color=color.white, style=line.style_dashed, width=1)
-    array.push(gBoxes, bx)
-    array.push(gTops,  t)
-    array.push(gBots,  b)
-    array.push(gMids,  ln)
+    bx = box.new(left=bar_index[1], top=t, right=bar_index + 1, bottom=b,
+                 border_color=na, bgcolor=na)
+    lnT = line.new(bar_index[1], t, bar_index + 1, t, color=color.green, style=line.style_solid, width=1)
+    lnB = line.new(bar_index[1], b, bar_index + 1, b, color=color.green, style=line.style_solid, width=1)
+    lbT = label.new(bar_index[1], t, "LH", color=na, textcolor=color.green, style=label.style_none, size=size.small)
+    lbB = label.new(bar_index[1], b, "LL", color=na, textcolor=color.green, style=label.style_none, size=size.small)
+    array.push(gBoxes,      bx)
+    array.push(gTops,       t)
+    array.push(gBots,       b)
+    array.push(gTopLines,   lnT)
+    array.push(gBotLines,   lnB)
+    array.push(gTopLabels,  lbT)
+    array.push(gBotLabels,  lbB)
+    array.push(gTouchTimes, 0.0)
+
+// -- ZONE REJECTION DETECTION -------------------------------------------------
+// Variante B: vela del color de la caja toca zona con wick, cuerpo afuera
+// Variante A: vela contraria toco la zona en barra anterior, vela actual del color de la caja confirma
+// Rule 1: zona invalida si el toque anterior fue hace menos de 1 hora (3600000 ms)
+var float _rejBullSL = na
+var float _rejBearSL = na
+_bullRej = false
+_bearRej = false
+_oneHour = i_rejHours * 3600000.0
+
+if i_enableReject and _green and array.size(gBoxes) > 0
+    for i = 0 to array.size(gBoxes) - 1
+        gT        = array.get(gTops,       i)
+        gB        = array.get(gBots,       i)
+        lastTouch = array.get(gTouchTimes, i)
+        _freshZone = lastTouch == 0.0 or (time - lastTouch) >= _oneHour
+        _varB = low <= gT and _bBot > gT
+        _varA = _red[1] and low[1] <= gT and math.min(open[1], close[1]) > gT
+        if (_varB or _varA) and _freshZone
+            _bullRej   := true
+            _rejBullSL := gB - i_extraSL * i_pip
+            array.set(gTouchTimes, i, time)
+            break
+
+if i_enableReject and _red and array.size(rBoxes) > 0
+    for i = 0 to array.size(rBoxes) - 1
+        rT        = array.get(rTops,       i)
+        rB        = array.get(rBots,       i)
+        lastTouch = array.get(rTouchTimes, i)
+        _freshZone = lastTouch == 0.0 or (time - lastTouch) >= _oneHour
+        _varB = high >= rB and _bTop < rB
+        _varA = _green[1] and high[1] >= rB and math.max(open[1], close[1]) < rB
+        if (_varB or _varA) and _freshZone
+            _bearRej   := true
+            _rejBearSL := rT + i_extraSL * i_pip
+            array.set(rTouchTimes, i, time)
+            break
 
 // -- TRADE TRACKING -----------------------------------------------------------
-var bool trActive    = false
-var box  trRisk      = na
-var box  trProfit    = na
-var int  nWins       = 0
-var int  nLosses     = 0
-var int  nClosed     = 0
-var int  lastEntryBar  = -999
-var int  lastCloseBar  = -999
+var bool  trActive    = false
+var box   trRisk      = na
+var box   trProfit    = na
+var int   nWins       = 0
+var int   nLosses     = 0
+var int   nClosed     = 0
+var int   lastEntryBar  = -999
+var int   lastCloseBar  = -999
+var float trEntry     = na
+var float trTP        = na
+var bool  trIsLong    = false
+var bool  trBE        = false
 
 // -- ENTRY --------------------------------------------------------------------
 // Extend R/R boxes PRIMERO para que siempre alcancen la barra de salida
@@ -184,46 +299,107 @@ if strategy.closedtrades > nClosed
     lastCloseBar := bar_index
     trActive     := false
 
+// Break-even: mover SL a precio de entrada cuando el trade avanza i_bePips
+if strategy.position_size != 0 and i_bePips > 0 and not trBE and not na(trEntry)
+    if trIsLong and high >= trEntry + i_bePips * i_pip
+        strategy.exit("BX", "Buy",  stop=trEntry, limit=trTP, comment_profit="Btp +1", comment_loss="BE 0")
+        trBE := true
+    else if not trIsLong and low <= trEntry - i_bePips * i_pip
+        strategy.exit("SX", "Sell", stop=trEntry, limit=trTP, comment_profit="Stp +1", comment_loss="BE 0")
+        trBE := true
+
 // Gates de entrada (evaluadas despues del cierre para que postTrade sea exacto)
 _cooldownOk  = (bar_index - lastEntryBar) >= i_cooldown
 _postTradeOk = (bar_index - lastCloseBar) >= i_postTrade
 _utcHour     = math.floor(time / 3600000) % 24
 _localHour   = (_utcHour + i_utcOffset + 24) % 24
 _inSession   = _localHour >= i_sesStart and _localHour < i_sesEnd
-bearEntry = bearSetup[1] and _cooldownOk and _postTradeOk and _inSession
-bullEntry = bullSetup[1] and _cooldownOk and _postTradeOk and _inSession
+bearEntry    = bearSetup and _cooldownOk and _postTradeOk and _inSession and _htfBearOk and i_enableShort
+bullEntry    = bullSetup and _cooldownOk and _postTradeOk and _inSession and _htfBullOk and i_enableLong
+bullRejEntry = _bullRej and _cooldownOk and _postTradeOk and _inSession and i_enableReject and not bullEntry and strategy.position_size == 0
+bearRejEntry = _bearRej and _cooldownOk and _postTradeOk and _inSession and i_enableReject and not bearEntry and strategy.position_size == 0
 
 if bearEntry and strategy.position_size == 0
-    zoneTop    = math.max(high[1], high[2])        // borde superior de la caja roja
-    eRef       = _bBot1                            // cuerpo inferior de la vela roja
-    rawSlDist  = zoneTop - eRef                    // distancia entrada-zona sin extraSL
+    zoneTop    = math.max(high, high[1])
+    eRef       = close
+    rawSlDist  = zoneTop - eRef
     _cappedS   = i_maxTPDist > 0 and rawSlDist / i_pip > i_maxTPDist
     slPrice    = _cappedS ? eRef + i_maxTPDist * i_pip : zoneTop + i_extraSL * i_pip
     slDist     = slPrice - eRef
     tpDist     = _cappedS ? slDist : slDist * i_rr
     tpPrice    = eRef - tpDist
-    strategy.entry("Sell", strategy.short, comment="Short")
-    strategy.exit("SX", "Sell", stop=slPrice, limit=tpPrice, comment_profit="Stp +1", comment_loss="Ssl -1")
-    trRisk        := box.new(bar_index, slPrice, bar_index + 1, eRef,    border_color=color.red,  bgcolor=color.new(color.red,  80))
-    trProfit      := box.new(bar_index, eRef,    bar_index + 1, tpPrice, border_color=color.teal, bgcolor=color.new(color.teal, 80))
-    trActive      := true
-    lastEntryBar  := bar_index
+    if slDist / i_pip >= i_minSlPips
+        _qty = slDist * syminfo.pointvalue > 0 ? i_riskUSD / (slDist * syminfo.pointvalue) : 1.0
+        strategy.entry("Sell", strategy.short, qty=_qty, comment="Short")
+        strategy.exit("SX", "Sell", stop=slPrice, limit=tpPrice, comment_profit="Stp +1", comment_loss="Ssl -1")
+        trRisk        := box.new(bar_index, slPrice, bar_index + 1, eRef,    border_color=color.red,  bgcolor=color.new(color.red,  80))
+        trProfit      := box.new(bar_index, eRef,    bar_index + 1, tpPrice, border_color=color.teal, bgcolor=color.new(color.teal, 80))
+        trActive      := true
+        lastEntryBar  := bar_index
+        trEntry       := eRef
+        trTP          := tpPrice
+        trIsLong      := false
+        trBE          := false
 
 if bullEntry and strategy.position_size == 0
-    zoneBot    = math.min(low[1], low[2])          // borde inferior de la caja verde
-    eRef       = _bTop1                            // cuerpo superior de la vela verde
-    rawSlDist  = eRef - zoneBot                    // distancia entrada-zona sin extraSL
+    zoneBot    = math.min(low, low[1])
+    eRef       = close
+    rawSlDist  = eRef - zoneBot
     _cappedB   = i_maxTPDist > 0 and rawSlDist / i_pip > i_maxTPDist
     slPrice    = _cappedB ? eRef - i_maxTPDist * i_pip : zoneBot - i_extraSL * i_pip
     slDist     = eRef - slPrice
     tpDist     = _cappedB ? slDist : slDist * i_rr
     tpPrice    = eRef + tpDist
-    strategy.entry("Buy", strategy.long, comment="Long")
-    strategy.exit("BX", "Buy", stop=slPrice, limit=tpPrice, comment_profit="Btp +1", comment_loss="Bsl -1")
-    trRisk        := box.new(bar_index, eRef,    bar_index + 1, slPrice, border_color=color.red,  bgcolor=color.new(color.red,  80))
-    trProfit      := box.new(bar_index, tpPrice, bar_index + 1, eRef,    border_color=color.teal, bgcolor=color.new(color.teal, 80))
-    trActive      := true
-    lastEntryBar  := bar_index
+    if slDist / i_pip >= i_minSlPips
+        _qty = slDist * syminfo.pointvalue > 0 ? i_riskUSD / (slDist * syminfo.pointvalue) : 1.0
+        strategy.entry("Buy", strategy.long, qty=_qty, comment="Long")
+        strategy.exit("BX", "Buy", stop=slPrice, limit=tpPrice, comment_profit="Btp +1", comment_loss="Bsl -1")
+        trRisk        := box.new(bar_index, eRef,    bar_index + 1, slPrice, border_color=color.red,  bgcolor=color.new(color.red,  80))
+        trProfit      := box.new(bar_index, tpPrice, bar_index + 1, eRef,    border_color=color.teal, bgcolor=color.new(color.teal, 80))
+        trActive      := true
+        lastEntryBar  := bar_index
+        trEntry       := eRef
+        trTP          := tpPrice
+        trIsLong      := true
+        trBE          := false
+
+if bullRejEntry and strategy.position_size == 0
+    eRef    = close
+    slPrice = _rejBullSL
+    slDist  = eRef - slPrice
+    tpDist  = slDist * i_rr
+    tpPrice = eRef + tpDist
+    if slDist / i_pip >= i_minSlPips
+        _qty = slDist * syminfo.pointvalue > 0 ? i_riskUSD / (slDist * syminfo.pointvalue) : 1.0
+        strategy.entry("Buy", strategy.long, qty=_qty, comment="RejL")
+        strategy.exit("BX", "Buy", stop=slPrice, limit=tpPrice, comment_profit="Btp +1", comment_loss="Bsl -1")
+        trRisk        := box.new(bar_index, eRef,    bar_index + 1, slPrice, border_color=color.red,  bgcolor=color.new(color.red,  80))
+        trProfit      := box.new(bar_index, tpPrice, bar_index + 1, eRef,    border_color=color.teal, bgcolor=color.new(color.teal, 80))
+        trActive      := true
+        lastEntryBar  := bar_index
+        trEntry       := eRef
+        trTP          := tpPrice
+        trIsLong      := true
+        trBE          := false
+
+if bearRejEntry and strategy.position_size == 0
+    eRef    = close
+    slPrice = _rejBearSL
+    slDist  = slPrice - eRef
+    tpDist  = slDist * i_rr
+    tpPrice = eRef - tpDist
+    if slDist / i_pip >= i_minSlPips
+        _qty = slDist * syminfo.pointvalue > 0 ? i_riskUSD / (slDist * syminfo.pointvalue) : 1.0
+        strategy.entry("Sell", strategy.short, qty=_qty, comment="RejS")
+        strategy.exit("SX", "Sell", stop=slPrice, limit=tpPrice, comment_profit="Stp +1", comment_loss="Ssl -1")
+        trRisk        := box.new(bar_index, slPrice, bar_index + 1, eRef,    border_color=color.red,  bgcolor=color.new(color.red,  80))
+        trProfit      := box.new(bar_index, eRef,    bar_index + 1, tpPrice, border_color=color.teal, bgcolor=color.new(color.teal, 80))
+        trActive      := true
+        lastEntryBar  := bar_index
+        trEntry       := eRef
+        trTP          := tpPrice
+        trIsLong      := false
+        trBE          := false
 
 // -- RR ANALYSIS TABLE (metricas reales, no teoricas) -------------------------
 var table tbl = table.new(position.bottom_right, 2, 6, border_width=1)
@@ -261,6 +437,142 @@ if i_debug
     table.cell(dbg, 0, 2, "Verdes activas", text_color=color.white, bgcolor=color.teal,   text_size=size.small)
     table.cell(dbg, 1, 2, str.tostring(gCount) + " / " + str.tostring(MAX_Z), text_color=gCount >= MAX_Z ? color.yellow : color.white, bgcolor=color.teal,   text_size=size.small)
 
+// -- ICT SESSIONS + VOLUME PROFILE (opcional) ---------------------------------
+_ict_lh      = (_localHour)
+_ict_inCtx   = i_ictOn and _ict_lh >= i_ctxStart and _ict_lh < i_nyStart
+_ict_inNY    = i_ictOn and _ict_lh >= i_nyStart   and _ict_lh < i_nyEndHour
+
+_ict_ctxOpen  = _ict_inCtx and not _ict_inCtx[1]
+_ict_ctxClose = not _ict_inCtx and _ict_inCtx[1]
+_ict_nyOpen   = _ict_inNY  and not _ict_inNY[1]
+
+_ict_localMin      = math.floor(time / 60000) % 60
+_ict_utcCloseH     = math.floor(time_close / 3600000) % 24
+_ict_localCloseH   = (_ict_utcCloseH + i_utcOffset + 24) % 24
+_ict_localCloseMin = math.floor(time_close / 60000) % 60
+_ict_nyEndTot      = i_nyEndHour * 60 + i_nyEndMin
+_ict_nyClose       = (_ict_localCloseH * 60 + _ict_localCloseMin) >= _ict_nyEndTot
+                 and (_ict_lh          * 60 + _ict_localMin)       <  _ict_nyEndTot
+
+_ict_lineTop = high * 3
+_ict_lineBot = low  / 3
+
+// Context H/L tracking
+if _ict_inCtx
+    if na(ict_runHi) or high > ict_runHi
+        ict_runHi := high
+    if na(ict_runLo) or low < ict_runLo
+        ict_runLo := low
+
+if ict_wasCTX and not _ict_inCtx
+    ict_lhLevel := ict_runHi
+    ict_llLevel := ict_runLo
+    ict_runHi   := na
+    ict_runLo   := na
+ict_wasCTX := _ict_inCtx
+
+// VP bar collection
+if _ict_ctxOpen
+    ict_ctxBar := bar_index
+    array.clear(ict_bH)
+    array.clear(ict_bL)
+    array.clear(ict_bV)
+
+if _ict_inCtx
+    array.push(ict_bH, high)
+    array.push(ict_bL, low)
+    array.push(ict_bV, volume)
+
+// Session bands
+if _ict_ctxOpen
+    ict_ctxBox := box.new(bar_index, _ict_lineTop, bar_index, _ict_lineBot,
+                          border_color=color.new(#7B2D8B, 100),
+                          bgcolor=color.new(#7B2D8B, 87))
+
+if _ict_inCtx and not na(ict_ctxBox)
+    box.set_top(ict_ctxBox,    _ict_lineTop)
+    box.set_bottom(ict_ctxBox, _ict_lineBot)
+    box.set_right(ict_ctxBox,  bar_index)
+
+if _ict_nyOpen
+    _ict_nyEndUTC_H = (i_nyEndHour - i_utcOffset + 24) % 24
+    _ict_nyCloseMs  = timestamp("UTC", year(time, "UTC"), month(time, "UTC"),
+                                dayofmonth(time, "UTC"), _ict_nyEndUTC_H, i_nyEndMin)
+    ict_nyBox := box.new(time, _ict_lineTop, _ict_nyCloseMs, _ict_lineBot,
+                         xloc=xloc.bar_time,
+                         border_color=color.new(#00AAAA, 100),
+                         bgcolor=color.new(#00EFEF, 90))
+
+if _ict_inNY and not na(ict_nyBox)
+    box.set_top(ict_nyBox,    _ict_lineTop)
+    box.set_bottom(ict_nyBox, _ict_lineBot)
+
+// Boundary markers
+if _ict_ctxOpen
+    _sl = line.new(bar_index, _ict_lineTop, bar_index, _ict_lineBot,
+                   color=color.new(#7B2D8B, 50), style=line.style_dotted, width=1)
+    _lb = i_showSesLbl ? label.new(bar_index, low, "Context Open",
+                         style=label.style_label_up, color=color.new(#7B2D8B, 45),
+                         textcolor=color.white, size=size.tiny) : na
+
+if _ict_ctxClose
+    _sl = line.new(bar_index, _ict_lineTop, bar_index, _ict_lineBot,
+                   color=color.new(#7B2D8B, 50), style=line.style_dotted, width=1)
+    _lb = i_showSesLbl ? label.new(bar_index, high, "Context Close",
+                         style=label.style_label_down, color=color.new(#7B2D8B, 45),
+                         textcolor=color.white, size=size.tiny) : na
+
+if _ict_nyOpen
+    _sl = line.new(bar_index, _ict_lineTop, bar_index, _ict_lineBot,
+                   color=color.new(#00AAAA, 50), style=line.style_dotted, width=1)
+    _lb = i_showSesLbl ? label.new(bar_index, low, "NY Open",
+                         style=label.style_label_up, color=color.new(#00AAAA, 45),
+                         textcolor=color.white, size=size.tiny) : na
+
+if _ict_nyClose
+    _sl = line.new(bar_index, _ict_lineTop, bar_index, _ict_lineBot,
+                   color=color.new(#00AAAA, 50), style=line.style_dotted, width=1)
+    _lb = i_showSesLbl ? label.new(bar_index, low, "NY Close",
+                         style=label.style_label_up, color=color.new(#00AAAA, 45),
+                         textcolor=color.white, size=size.tiny) : na
+
+// Volume Profile at Context close
+if _ict_ctxClose and array.size(ict_bV) > 0 and not na(ict_lhLevel) and not na(ict_llLevel)
+    _pMin  = ict_llLevel
+    _pMax  = ict_lhLevel
+    _range = _pMax - _pMin
+    if _range > 0
+        _sz   = _range / i_vpLevels
+        _vols = array.new_float(i_vpLevels, 0.0)
+        _nB   = array.size(ict_bV)
+        for b = 0 to _nB - 1
+            _bH = array.get(ict_bH, b)
+            _bL = array.get(ict_bL, b)
+            _bV = array.get(ict_bV, b)
+            _bR = _bH - _bL
+            if _bR > 0.0
+                for i = 0 to i_vpLevels - 1
+                    _lL = _pMin + i * _sz
+                    _lH = _lL + _sz
+                    _ov = math.max(0.0, math.min(_bH, _lH) - math.max(_bL, _lL))
+                    array.set(_vols, i, array.get(_vols, i) + _bV * _ov / _bR)
+        _maxV = array.max(_vols)
+        _pocI = array.indexof(_vols, _maxV)
+        if _maxV > 0
+            _maxW = math.min(i_vpWidth, _nB)
+            for i = 0 to i_vpLevels - 1
+                _lL  = _pMin + i * _sz
+                _lH  = _lL + _sz
+                _pct = array.get(_vols, i) / _maxV
+                _w   = math.max(1, math.round(_pct * _maxW))
+                _col = i == _pocI ? color.new(color.yellow, 45) : color.new(color.gray, 65)
+                _bx  = box.new(ict_ctxBar, _lH, ict_ctxBar + _w, _lL,
+                               border_color=color.new(color.gray, 88),
+                               bgcolor=_col)
+
 // -- VISUALS ------------------------------------------------------------------
-plotshape(bearEntry, "Sell", shape.labeldown, location.abovebar, #CC0099,     text="SELL NOW", textcolor=color.white)
-plotshape(bullEntry, "Buy",  shape.labelup,   location.belowbar, color.green, text="BUY NOW",  textcolor=color.white)
+plot(i_htfFilter ? ema_htf : na, "EMA HTF", color.new(color.orange, 40), linewidth=2)
+plotshape(bearEntry,    "Sell",  shape.labeldown, location.abovebar, #CC0099,         text="SELL",     textcolor=color.white)
+plotshape(bullEntry,    "Buy",   shape.labelup,   location.belowbar, color.green,     text="BUY",      textcolor=color.white)
+plotshape(bearRejEntry, "RejS",  shape.triangledown, location.abovebar, color.orange, text="REJ-S",    textcolor=color.white, size=size.small)
+plotshape(bullRejEntry, "RejL",  shape.triangleup,   location.belowbar, color.aqua,   text="REJ-L",    textcolor=color.white, size=size.small)
