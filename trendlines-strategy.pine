@@ -26,8 +26,8 @@ i_htf1Period = input.int(5,  "HTF1 - Periodo pivote", minval=2, maxval=20, group
 i_htf2TF     = input.timeframe("240", "HTF2 - Timeframe",             group=GRP_HTF)
 i_htf2Period = input.int(5,  "HTF2 - Periodo pivote", minval=2, maxval=20, group=GRP_HTF)
 i_htfTol     = input.float(1.5, "Tolerancia confluencia HTF (xATR)", minval=0.5, maxval=4.0, step=0.5, group=GRP_HTF)
-i_minScore   = input.int(2,  "Score minimo para entrar", minval=0, maxval=6, group=GRP_HTF,
-               tooltip="HTF2 +2, HTF1 +1, LD +1, NY +1, TF actual >=4 toques +1. Max=6.")
+i_minScore   = input.int(0,  "Score minimo para entrar", minval=0, maxval=6, group=GRP_HTF,
+               tooltip="HTF2 +2, HTF1 +1, LD +1, NY +1, TF actual >=4 toques +1. Max=6. 0 = sin filtro.")
 
 var GRP_SES = "Sesiones"
 i_asiaStartH = input.int(0,  "Asia - Inicio UTC", minval=0, maxval=23, group=GRP_SES)
