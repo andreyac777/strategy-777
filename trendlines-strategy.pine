@@ -1,6 +1,6 @@
 //@version=6
-strategy("TL Rejections", shorttitle="TLS", overlay=true,
-         max_lines_count=20, max_boxes_count=500, max_labels_count=500,
+strategy("TL Rejections - MTF", shorttitle="TLS", overlay=true,
+         max_lines_count=500, max_boxes_count=500, max_labels_count=500,
          initial_capital=10000, currency=currency.USD,
          default_qty_type=strategy.fixed, default_qty_value=1,
          process_orders_on_close=true)
@@ -19,6 +19,15 @@ i_atrMult    = input.float(0.5, "Tolerancia de toque (xATR)", minval=0.1, maxval
                tooltip="Ventana alrededor de la trendline para detectar el toque")
 i_wickRatio  = input.float(0.25, "Wick minimo (wick/rango)", minval=0.10, maxval=0.80, step=0.05, group=GRP_PIV,
                tooltip="Fraccion del rango de la vela que debe ser mecha de rechazo. 0.25 recomendado.")
+
+var GRP_HTF = "Confluencia HTF"
+i_htf1TF     = input.timeframe("60",  "HTF1 - Timeframe",             group=GRP_HTF)
+i_htf1Period = input.int(5,  "HTF1 - Periodo pivote", minval=2, maxval=20, group=GRP_HTF)
+i_htf2TF     = input.timeframe("240", "HTF2 - Timeframe",             group=GRP_HTF)
+i_htf2Period = input.int(5,  "HTF2 - Periodo pivote", minval=2, maxval=20, group=GRP_HTF)
+i_htfTol     = input.float(1.5, "Tolerancia confluencia HTF (xATR)", minval=0.5, maxval=4.0, step=0.5, group=GRP_HTF)
+i_minScore   = input.int(2,  "Score minimo para entrar", minval=0, maxval=6, group=GRP_HTF,
+               tooltip="HTF2 +2, HTF1 +1, LD +1, NY +1, TF actual >=4 toques +1. Max=6.")
 
 var GRP_SES = "Sesiones"
 i_asiaStartH = input.int(0,  "Asia - Inicio UTC", minval=0, maxval=23, group=GRP_SES)
@@ -45,7 +54,11 @@ i_colH    = input.color(#00bfff, "Color resistencia", group=GRP_VIS)
 i_colL    = input.color(#ff5252, "Color soporte",     group=GRP_VIS)
 i_colAsia = input.color(color.new(color.white, 90), "Asia fondo", group=GRP_VIS)
 i_colLD   = input.color(color.new(#9B59B6, 87),     "LD fondo",   group=GRP_VIS)
-i_colNY   = input.color(color.new(#00EFEF, 90),     "NY fondo",   group=GRP_VIS)
+i_colNY    = input.color(color.new(#00EFEF, 90),     "NY fondo",        group=GRP_VIS)
+i_colHTF1H = input.color(color.new(#CE93D8,  0),    "HTF1 resistencia", group=GRP_VIS)
+i_colHTF1L = input.color(color.new(#CE93D8,  0),    "HTF1 soporte",     group=GRP_VIS)
+i_colHTF2H = input.color(color.new(#9B59B6,  0),    "HTF2 resistencia", group=GRP_VIS)
+i_colHTF2L = input.color(color.new(#FFFFFF,  0),    "HTF2 soporte",     group=GRP_VIS)
 
 // =============================================================================
 // SESIONES
@@ -205,6 +218,136 @@ f_proj(int b1, float v1, int b2, float v2) =>
             v2) :
         float(na))
 
+// =============================================================================
+// CONFLUENCIA HTF - trendlines de H1 y H4 proyectadas al bar actual
+// =============================================================================
+
+f_tlNow(float p1, int t1, float p2, int t2) =>
+    (not na(p2) and not na(t2) ?
+        (not na(p1) and not na(t1) and t2 > t1 ?
+            p2 + (p2 - p1) / float(t2 - t1) * float(time - t2) :
+            p2) :
+        float(na))
+
+f_htfH(int per) =>
+    float piv = ta.pivothigh(high, per, per)
+    bool  hit = not na(piv)
+    float v2  = ta.valuewhen(hit, piv,       0)
+    int   t2  = ta.valuewhen(hit, time[per], 0)
+    float v1  = ta.valuewhen(hit, piv,       1)
+    int   t1  = ta.valuewhen(hit, time[per], 1)
+    [v2, t2, v1, t1]
+
+f_htfL(int per) =>
+    float piv = ta.pivotlow(low, per, per)
+    bool  hit = not na(piv)
+    float v2  = ta.valuewhen(hit, piv,       0)
+    int   t2  = ta.valuewhen(hit, time[per], 0)
+    float v1  = ta.valuewhen(hit, piv,       1)
+    int   t1  = ta.valuewhen(hit, time[per], 1)
+    [v2, t2, v1, t1]
+
+[_h1rP2, _h1rT2, _h1rP1, _h1rT1] = request.security(syminfo.tickerid, i_htf1TF,
+    f_htfH(i_htf1Period), lookahead=barmerge.lookahead_off)
+[_h1sP2, _h1sT2, _h1sP1, _h1sT1] = request.security(syminfo.tickerid, i_htf1TF,
+    f_htfL(i_htf1Period), lookahead=barmerge.lookahead_off)
+[_h2rP2, _h2rT2, _h2rP1, _h2rT1] = request.security(syminfo.tickerid, i_htf2TF,
+    f_htfH(i_htf2Period), lookahead=barmerge.lookahead_off)
+[_h2sP2, _h2sT2, _h2sP1, _h2sT1] = request.security(syminfo.tickerid, i_htf2TF,
+    f_htfL(i_htf2Period), lookahead=barmerge.lookahead_off)
+
+float htf1H_now = f_tlNow(_h1rP1, _h1rT1, _h1rP2, _h1rT2)
+float htf1L_now = f_tlNow(_h1sP1, _h1sT1, _h1sP2, _h1sT2)
+float htf2H_now = f_tlNow(_h2rP1, _h2rT1, _h2rP2, _h2rT2)
+float htf2L_now = f_tlNow(_h2sP1, _h2sT1, _h2sP2, _h2sT2)
+
+var line  _htf1H_line = na
+var line  _htf1L_line = na
+var line  _htf2H_line = na
+var line  _htf2L_line = na
+var float _prev_h1rP2 = float(na)
+var float _prev_h1sP2 = float(na)
+var float _prev_h2rP2 = float(na)
+var float _prev_h2sP2 = float(na)
+
+if not na(_h1rP2) and not na(_h1rP1) and _h1rP2 != _prev_h1rP2
+    line.delete(_htf1H_line)
+    _htf1H_line := line.new(_h1rT1, _h1rP1, _h1rT2, _h1rP2,
+                            xloc=xloc.bar_time, extend=extend.right,
+                            color=i_colHTF1H, width=2, style=line.style_dashed)
+    _prev_h1rP2 := _h1rP2
+
+if not na(_h1sP2) and not na(_h1sP1) and _h1sP2 != _prev_h1sP2
+    line.delete(_htf1L_line)
+    _htf1L_line := line.new(_h1sT1, _h1sP1, _h1sT2, _h1sP2,
+                            xloc=xloc.bar_time, extend=extend.right,
+                            color=i_colHTF1L, width=2, style=line.style_dashed)
+    _prev_h1sP2 := _h1sP2
+
+if not na(_h2rP2) and not na(_h2rP1) and _h2rP2 != _prev_h2rP2
+    line.delete(_htf2H_line)
+    _htf2H_line := line.new(_h2rT1, _h2rP1, _h2rT2, _h2rP2,
+                            xloc=xloc.bar_time, extend=extend.right,
+                            color=i_colHTF2H, width=3, style=line.style_solid)
+    _prev_h2rP2 := _h2rP2
+
+if not na(_h2sP2) and not na(_h2sP1) and _h2sP2 != _prev_h2sP2
+    line.delete(_htf2L_line)
+    _htf2L_line := line.new(_h2sT1, _h2sP1, _h2sT2, _h2sP2,
+                            xloc=xloc.bar_time, extend=extend.right,
+                            color=i_colHTF2L, width=3, style=line.style_solid)
+    _prev_h2sP2 := _h2sP2
+
+f_scoreBear(float lvl) =>
+    float aTol = atrVal * i_htfTol
+    int   sc   = 0
+    if not na(htf1H_now) and math.abs(lvl - htf1H_now) <= aTol
+        sc += 1
+    if not na(htf2H_now) and math.abs(lvl - htf2H_now) <= aTol
+        sc += 2
+    if _inLD
+        sc += 1
+    if _inNY
+        sc += 1
+    if _tlH_score >= 4
+        sc += 1
+    sc
+
+f_scoreBull(float lvl) =>
+    float aTol = atrVal * i_htfTol
+    int   sc   = 0
+    if not na(htf1L_now) and math.abs(lvl - htf1L_now) <= aTol
+        sc += 1
+    if not na(htf2L_now) and math.abs(lvl - htf2L_now) <= aTol
+        sc += 2
+    if _inLD
+        sc += 1
+    if _inNY
+        sc += 1
+    if _tlL_score >= 4
+        sc += 1
+    sc
+
+f_prob(int s) =>
+    string txt = ""
+    color  col = color.gray
+    if s >= 5
+        txt := "MUY ALTA"
+        col := color.new(color.green, 0)
+    else if s >= 4
+        txt := "ALTA"
+        col := color.new(#26A69A, 0)
+    else if s >= 3
+        txt := "MEDIA-ALTA"
+        col := color.new(color.yellow, 0)
+    else if s >= 2
+        txt := "MEDIA"
+        col := color.new(color.orange, 0)
+    else
+        txt := "BAJA"
+        col := color.new(color.red, 20)
+    [txt, col]
+
 if not na(pivH)
     f_push(_pH_b, _pH_v, bar_index - i_pivPer, pivH)
     [b1, v1, b2, v2, sc] = f_bestFit(_pH_b, _pH_v, _tol, i_nPiv)
@@ -253,15 +396,24 @@ f_bullRej(float lvl) =>
     and close[1] > lvl + _tol * 0.3
     and _dnWick / _range >= i_wickRatio)
 
+// _tradeOpen se lee al inicio del bar (antes de cualquier cierre).
+// Garantiza que en el bar donde SL/TP es tocado NO se abre un nuevo trade.
+var bool  _tradeOpen = false
+
+int _bearScore = f_scoreBear(tlH_now)
+int _bullScore = f_scoreBull(tlL_now)
+
 bool bearSig = (f_bearRej(tlH_now)
     and _tlH_score >= i_minTouches
-    and _sesOK and _inTradeHours
-    and strategy.position_size == 0)
+    and _bearScore >= i_minScore
+    and not _tradeOpen
+    and _sesOK and _inTradeHours)
 
 bool bullSig = (f_bullRej(tlL_now)
     and _tlL_score >= i_minTouches
-    and _sesOK and _inTradeHours
-    and strategy.position_size == 0)
+    and _bullScore >= i_minScore
+    and not _tradeOpen
+    and _sesOK and _inTradeHours)
 
 plotshape(bearSig, "SHORT entrada", location=location.abovebar,
           color=i_colH, style=shape.triangledown, size=size.small)
@@ -283,8 +435,9 @@ if trActive
     bool _hitSL = trLong ? low  <= trSL : high >= trSL
     bool _hitTP = trLong ? high >= trTP : low  <= trTP
     if _hitSL or _hitTP or strategy.closedtrades > nClosed
-        trActive := false
-        nClosed  := strategy.closedtrades
+        trActive   := false
+        _tradeOpen := false
+        nClosed    := strategy.closedtrades
     else
         box.set_right(trRisk,   bar_index)
         box.set_right(trProfit, bar_index)
@@ -301,10 +454,16 @@ if bearSig
                         border_color=color.red,  bgcolor=color.new(color.red,  80))
     trProfit := box.new(bar_index, _e,  bar_index + 1, _tp2,
                         border_color=color.teal, bgcolor=color.new(color.teal, 80))
-    trActive := true
-    trSL     := _sl
-    trTP     := _tp2
-    trLong   := false
+    trActive   := true
+    _tradeOpen := true
+    trSL       := _sl
+    trTP       := _tp2
+    trLong     := false
+    [_ptS, _pcS] = f_prob(_bearScore)
+    label _probLblS = label.new(bar_index, _sl + atrVal * 0.6,
+                    "[" + _ptS + "  " + str.tostring(_bearScore) + "]",
+                    style=label.style_label_down,
+                    color=color.new(_pcS, 30), textcolor=color.white, size=size.tiny)
     line _slLineS  = line.new(bar_index, _sl,  bar_index + 4,  _sl,
                     color=color.new(color.red, 50), width=1)
     line _tp2LineS = line.new(bar_index, _tp2, bar_index + 25, _tp2,
@@ -343,10 +502,16 @@ if bullSig
                         border_color=color.red,  bgcolor=color.new(color.red,  80))
     trProfit := box.new(bar_index, _tp2, bar_index + 1, _e,
                         border_color=color.teal, bgcolor=color.new(color.teal, 80))
-    trActive := true
-    trSL     := _sl
-    trTP     := _tp2
-    trLong   := true
+    trActive   := true
+    _tradeOpen := true
+    trSL       := _sl
+    trTP       := _tp2
+    trLong     := true
+    [_ptL, _pcL] = f_prob(_bullScore)
+    label _probLblL = label.new(bar_index, _sl - atrVal * 0.6,
+                    "[" + _ptL + "  " + str.tostring(_bullScore) + "]",
+                    style=label.style_label_up,
+                    color=color.new(_pcL, 30), textcolor=color.white, size=size.tiny)
     line _slLineL  = line.new(bar_index, _sl,  bar_index + 4,  _sl,
                     color=color.new(color.red, 50), width=1)
     line _tp2LineL = line.new(bar_index, _tp2, bar_index + 25, _tp2,
