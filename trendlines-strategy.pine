@@ -19,6 +19,8 @@ i_atrMult    = input.float(0.5, "Tolerancia de toque (xATR)", minval=0.1, maxval
                tooltip="Ventana alrededor de la trendline para detectar el toque")
 i_wickRatio  = input.float(0.25, "Wick minimo (wick/rango)", minval=0.10, maxval=0.80, step=0.05, group=GRP_PIV,
                tooltip="Fraccion del rango de la vela que debe ser mecha de rechazo. 0.25 recomendado.")
+i_minSpacing = input.int(20, "Min barras entre toques", minval=3, maxval=100, group=GRP_PIV,
+               tooltip="Barras minimas entre dos toques validos de la misma TL. Evita que una consolidacion infle el score. 20 barras = 100 min en 5m.")
 
 var GRP_HTF = "Confluencia HTF"
 i_htf1TF     = input.timeframe("60",  "HTF1 - Timeframe",             group=GRP_HTF)
@@ -161,13 +163,20 @@ var float[] _pH_v = array.new_float(12, float(na))
 var int[]   _pL_b = array.new_int(12,   int(na))
 var float[] _pL_v = array.new_float(12, float(na))
 
-var line _tlH = na
-var line _tlL = na
-
-var int   _tlH_b1    = int(na),   var float _tlH_v1 = float(na)
-var int   _tlH_b2    = int(na),   var float _tlH_v2 = float(na)
-var int   _tlL_b1    = int(na),   var float _tlL_v1 = float(na)
-var int   _tlL_b2    = int(na),   var float _tlL_v2 = float(na)
+// Sistema de 2 slots por direccion: cur = TL mas reciente, prv = TL anterior
+// cur empieza tenue y se vuelve solida con toques; prv se desvanece conforme cur gana toques
+var line  _tlH_cur = na,          var line  _tlH_prv = na
+var int   _scH_cur = 0,           var int   _scH_prv = 0
+var int   _b1H_cur = int(na),     var float _v1H_cur = float(na)
+var int   _b2H_cur = int(na),     var float _v2H_cur = float(na)
+var int   _b1H_prv = int(na),     var float _v1H_prv = float(na)
+var int   _b2H_prv = int(na),     var float _v2H_prv = float(na)
+var line  _tlL_cur = na,          var line  _tlL_prv = na
+var int   _scL_cur = 0,           var int   _scL_prv = 0
+var int   _b1L_cur = int(na),     var float _v1L_cur = float(na)
+var int   _b2L_cur = int(na),     var float _v2L_cur = float(na)
+var int   _b1L_prv = int(na),     var float _v1L_prv = float(na)
+var int   _b2L_prv = int(na),     var float _v2L_prv = float(na)
 var int   _tlH_score = 0
 var int   _tlL_score = 0
 
@@ -177,7 +186,7 @@ f_push(int[] bars, float[] vals, int b, float v) =>
     array.shift(vals)
     array.push(vals, v)
 
-f_bestFit(int[] bars, float[] vals, float ftol, int nPiv) =>
+f_bestFit(int[] bars, float[] vals, float ftol, int nPiv, int minSpacing) =>
     int   N    = 12
     int   from = N - nPiv
     int   bestB1 = int(na),   bestB2 = int(na)
@@ -193,15 +202,18 @@ f_bestFit(int[] bars, float[] vals, float ftol, int nPiv) =>
             float vj = array.get(vals, j)
             if na(bj) or bi == bj
                 continue
-            float sl = (vj - vi) / float(bj - bi)
-            int   sc = 0
+            float sl        = (vj - vi) / float(bj - bi)
+            int   sc        = 0
+            int   lastTouch = -9999
             for k = from to N - 1
                 int   bk = array.get(bars, k)
                 float vk = array.get(vals, k)
                 if na(bk)
                     continue
                 if math.abs(vk - (vi + sl * float(bk - bi))) <= ftol
-                    sc += 1
+                    if bk - lastTouch >= minSpacing
+                        sc        += 1
+                        lastTouch := bk
             bool newer = na(bestB2) or bj > bestB2
             if sc > bestScore or (sc == bestScore and newer)
                 bestScore := sc
@@ -217,6 +229,10 @@ f_proj(int b1, float v1, int b2, float v2) =>
             v2 + (v2 - v1) / float(b2 - b1) * float(bar_index - b2) :
             v2) :
         float(na))
+
+// Transparencia segun score: sc=1 -> 55%, sc=2 -> 30%, sc=3 -> 5%, sc=4+ -> 0% (solida)
+f_tlAlpha(int sc) =>
+    math.max(0, 80 - sc * 25)
 
 // =============================================================================
 // CONFLUENCIA HTF - trendlines de H1 y H4 proyectadas al bar actual
@@ -350,28 +366,104 @@ f_prob(int s) =>
 
 if not na(pivH)
     f_push(_pH_b, _pH_v, bar_index - i_pivPer, pivH)
-    [b1, v1, b2, v2, sc] = f_bestFit(_pH_b, _pH_v, _tol, i_nPiv)
+    [b1, v1, b2, v2, sc] = f_bestFit(_pH_b, _pH_v, _tol, i_nPiv, i_minSpacing)
     if not na(b1)
-        line.delete(_tlH)
-        _tlH      := line.new(b1, v1, b2, v2, color=i_colH,
-                             width=sc >= i_minTouches ? 3 : 1, extend=extend.right)
-        _tlH_b1   := b1,  _tlH_v1 := v1
-        _tlH_b2   := b2,  _tlH_v2 := v2
-        _tlH_score := sc
+        bool _newH = na(_b2H_cur) or b2 != _b2H_cur or b1 != _b1H_cur
+        if _newH
+            line.delete(_tlH_prv)
+            _tlH_prv := _tlH_cur,  _scH_prv := _scH_cur
+            _b1H_prv := _b1H_cur,  _v1H_prv := _v1H_cur
+            _b2H_prv := _b2H_cur,  _v2H_prv := _v2H_cur
+            _tlH_cur  := line.new(b1, v1, b2, v2,
+                                  color=color.new(i_colH, f_tlAlpha(sc)),
+                                  width=sc >= i_minTouches ? 2 : 1, extend=extend.right)
+            _b1H_cur := b1,  _v1H_cur := v1
+            _b2H_cur := b2,  _v2H_cur := v2
+            _scH_cur  := sc
+            if not na(_tlH_prv)
+                int _aP = math.min(100, f_tlAlpha(_scH_prv) + sc * 25)
+                line.set_color(_tlH_prv, color.new(i_colH, _aP))
+                line.set_width(_tlH_prv, 1)
+        else
+            _scH_cur := sc
+            line.set_color(_tlH_cur, color.new(i_colH, f_tlAlpha(sc)))
+            line.set_width(_tlH_cur, sc >= i_minTouches ? 2 : 1)
+            if not na(_tlH_prv)
+                int _aP = math.min(100, f_tlAlpha(_scH_prv) + sc * 25)
+                if _aP >= 98
+                    line.delete(_tlH_prv)
+                    _tlH_prv := na,      _scH_prv := 0
+                    _b1H_prv := int(na), _v1H_prv := float(na)
+                    _b2H_prv := int(na), _v2H_prv := float(na)
+                else
+                    line.set_color(_tlH_prv, color.new(i_colH, _aP))
 
 if not na(pivL)
     f_push(_pL_b, _pL_v, bar_index - i_pivPer, pivL)
-    [b1, v1, b2, v2, sc] = f_bestFit(_pL_b, _pL_v, _tol, i_nPiv)
+    [b1, v1, b2, v2, sc] = f_bestFit(_pL_b, _pL_v, _tol, i_nPiv, i_minSpacing)
     if not na(b1)
-        line.delete(_tlL)
-        _tlL      := line.new(b1, v1, b2, v2, color=i_colL,
-                             width=sc >= i_minTouches ? 3 : 1, extend=extend.right)
-        _tlL_b1   := b1,  _tlL_v1 := v1
-        _tlL_b2   := b2,  _tlL_v2 := v2
-        _tlL_score := sc
+        bool _newL = na(_b2L_cur) or b2 != _b2L_cur or b1 != _b1L_cur
+        if _newL
+            line.delete(_tlL_prv)
+            _tlL_prv := _tlL_cur,  _scL_prv := _scL_cur
+            _b1L_prv := _b1L_cur,  _v1L_prv := _v1L_cur
+            _b2L_prv := _b2L_cur,  _v2L_prv := _v2L_cur
+            _tlL_cur  := line.new(b1, v1, b2, v2,
+                                  color=color.new(i_colL, f_tlAlpha(sc)),
+                                  width=sc >= i_minTouches ? 2 : 1, extend=extend.right)
+            _b1L_cur := b1,  _v1L_cur := v1
+            _b2L_cur := b2,  _v2L_cur := v2
+            _scL_cur  := sc
+            if not na(_tlL_prv)
+                int _aP = math.min(100, f_tlAlpha(_scL_prv) + sc * 25)
+                line.set_color(_tlL_prv, color.new(i_colL, _aP))
+                line.set_width(_tlL_prv, 1)
+        else
+            _scL_cur := sc
+            line.set_color(_tlL_cur, color.new(i_colL, f_tlAlpha(sc)))
+            line.set_width(_tlL_cur, sc >= i_minTouches ? 2 : 1)
+            if not na(_tlL_prv)
+                int _aP = math.min(100, f_tlAlpha(_scL_prv) + sc * 25)
+                if _aP >= 98
+                    line.delete(_tlL_prv)
+                    _tlL_prv := na,      _scL_prv := 0
+                    _b1L_prv := int(na), _v1L_prv := float(na)
+                    _b2L_prv := int(na), _v2L_prv := float(na)
+                else
+                    line.set_color(_tlL_prv, color.new(i_colL, _aP))
 
-float tlH_now = f_proj(_tlH_b1, _tlH_v1, _tlH_b2, _tlH_v2)
-float tlL_now = f_proj(_tlL_b1, _tlL_v1, _tlL_b2, _tlL_v2)
+// Seleccionar la TL mas fuerte disponible (cur o prv) para senales de entrada
+_tlH_score := 0
+_tlL_score := 0
+float _curH_now = f_proj(_b1H_cur, _v1H_cur, _b2H_cur, _v2H_cur)
+float _prvH_now = f_proj(_b1H_prv, _v1H_prv, _b2H_prv, _v2H_prv)
+float _curL_now = f_proj(_b1L_cur, _v1L_cur, _b2L_cur, _v2L_cur)
+float _prvL_now = f_proj(_b1L_prv, _v1L_prv, _b2L_prv, _v2L_prv)
+
+float tlH_now = float(na)
+float tlL_now = float(na)
+
+if _scH_cur >= i_minTouches and not na(_curH_now)
+    if not na(_prvH_now) and _scH_prv > _scH_cur
+        tlH_now := _prvH_now
+        _tlH_score := _scH_prv
+    else
+        tlH_now := _curH_now
+        _tlH_score := _scH_cur
+else if _scH_prv >= i_minTouches and not na(_prvH_now)
+    tlH_now := _prvH_now
+    _tlH_score := _scH_prv
+
+if _scL_cur >= i_minTouches and not na(_curL_now)
+    if not na(_prvL_now) and _scL_prv > _scL_cur
+        tlL_now := _prvL_now
+        _tlL_score := _scL_prv
+    else
+        tlL_now := _curL_now
+        _tlL_score := _scL_cur
+else if _scL_prv >= i_minTouches and not na(_prvL_now)
+    tlL_now := _prvL_now
+    _tlL_score := _scL_prv
 
 // =============================================================================
 // SENALES: wick de rechazo contra la trendline proyectada al bar actual
