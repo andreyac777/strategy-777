@@ -1,0 +1,162 @@
+//@version=6
+indicator("Sessions", overlay=true, max_lines_count=200, max_boxes_count=200, max_labels_count=200)
+
+// -- INPUTS -------------------------------------------------------------------
+i_utcOffset  = input.int(-6,  "UTC Offset",                minval=-12, maxval=14,  group="Sessions", tooltip="Colombia = -5 | Nueva York EST = -5 | Londres GMT = 0")
+i_ctxStart   = input.int(2,   "Context Start (hora local)", minval=0, maxval=23,   group="Sessions", tooltip="Inicio de London = inicio del contexto")
+i_nyStart    = input.int(8,   "NY Start = Context Close",   minval=0, maxval=23,   group="Sessions")
+i_nyEndHour  = input.int(16,  "NY End Hora  (local)",       minval=0, maxval=23,   group="Sessions")
+i_nyEndMin   = input.int(0,   "NY End Minuto",              minval=0, maxval=59,   group="Sessions")
+i_showLabels = input.bool(true, "Mostrar etiquetas de sesion", group="Sessions")
+i_showVP     = input.bool(true, "Mostrar Volume Profile",      group="Volume Profile")
+i_vpLevels   = input.int(15,   "Niveles",   minval=5, maxval=30,  group="Volume Profile")
+i_vpWidth    = input.int(15,   "Ancho max (barras)", minval=3, maxval=40, group="Volume Profile")
+
+// -- SESIONES -----------------------------------------------------------------
+_utcHour   = math.floor(time / 3600000) % 24
+_localHour = (_utcHour + i_utcOffset + 24) % 24
+_localMin  = math.floor(time / 60000) % 60
+_inCtx     = _localHour >= i_ctxStart and _localHour < i_nyStart
+_inNY      = _localHour >= i_nyStart  and _localHour < i_nyEndHour
+
+// -- CONTEXT HIGH / LOW -------------------------------------------------------
+var float _runHigh    = na
+var float _runLow     = na
+var int   _runHighBar = na
+var int   _runLowBar  = na
+var bool  _wasInCtx   = false
+
+if _inCtx
+    if na(_runHigh) or high > _runHigh
+        _runHigh    := high
+        _runHighBar := bar_index
+    if na(_runLow) or low < _runLow
+        _runLow    := low
+        _runLowBar := bar_index
+
+var float lhLevel = na
+var float llLevel = na
+
+if _wasInCtx and not _inCtx
+    lhLevel   := _runHigh
+    llLevel   := _runLow
+    _runHigh  := na
+    _runLow   := na
+    _runHighBar := na
+    _runLowBar  := na
+
+_wasInCtx := _inCtx
+
+// -- VOLUME PROFILE - almacenamiento de barras de Context ---------------------
+var int     ctxOpenBarIdx = na
+var float[] ctxBarH       = array.new_float(0)
+var float[] ctxBarL       = array.new_float(0)
+var float[] ctxBarV       = array.new_float(0)
+
+if _inCtx and not _inCtx[1]
+    ctxOpenBarIdx := bar_index
+    array.clear(ctxBarH)
+    array.clear(ctxBarL)
+    array.clear(ctxBarV)
+
+if _inCtx
+    array.push(ctxBarH, high)
+    array.push(ctxBarL, low)
+    array.push(ctxBarV, volume)
+
+// -- SESSION BOUNDARY FLAGS ---------------------------------------------------
+_ctxOpen  = _inCtx and not _inCtx[1]
+_ctxClose = not _inCtx and _inCtx[1]
+_nyOpen   = _inNY  and not _inNY[1]
+
+_utcCloseHour   = math.floor(time_close / 3600000) % 24
+_localCloseHour = (_utcCloseHour + i_utcOffset + 24) % 24
+_localCloseMin  = math.floor(time_close / 60000) % 60
+_nyEndMinutes   = i_nyEndHour * 60 + i_nyEndMin
+_nyClose        = (_localCloseHour * 60 + _localCloseMin) >= _nyEndMinutes
+             and (_localHour       * 60 + _localMin)      <  _nyEndMinutes
+
+_lineTop = high * 3
+_lineBot = low  / 3
+
+// -- SESSION BANDS ------------------------------------------------------------
+var box ctxBox = na
+var box nyBox  = na
+
+if _ctxOpen
+    ctxBox := box.new(bar_index, _lineTop, bar_index, _lineBot,
+                      border_color=color.new(#7B2D8B, 100),
+                      bgcolor=color.new(#7B2D8B, 87))
+
+if _inCtx and not na(ctxBox)
+    box.set_top(ctxBox,    _lineTop)
+    box.set_bottom(ctxBox, _lineBot)
+    box.set_right(ctxBox,  bar_index)
+
+if _nyOpen
+    _nyEndUTC_H = (i_nyEndHour - i_utcOffset + 24) % 24
+    _nyCloseMs  = timestamp("UTC", year(time, "UTC"), month(time, "UTC"),
+                            dayofmonth(time, "UTC"), _nyEndUTC_H, i_nyEndMin)
+    nyBox := box.new(time, _lineTop, _nyCloseMs, _lineBot,
+                     xloc=xloc.bar_time,
+                     border_color=color.new(#00AAAA, 100),
+                     bgcolor=color.new(#00EFEF, 90))
+
+if _inNY and not na(nyBox)
+    box.set_top(nyBox,    _lineTop)
+    box.set_bottom(nyBox, _lineBot)
+
+// -- SESSION BOUNDARY MARKERS -------------------------------------------------
+if _ctxOpen
+    line.new(bar_index, _lineTop, bar_index, _lineBot, color=color.new(#7B2D8B, 50), style=line.style_dotted, width=1)
+    if i_showLabels
+        label.new(bar_index, low, "Context Open",  style=label.style_label_up,   color=color.new(#7B2D8B, 45), textcolor=color.white, size=size.tiny)
+
+if _ctxClose
+    line.new(bar_index, _lineTop, bar_index, _lineBot, color=color.new(#7B2D8B, 50), style=line.style_dotted, width=1)
+    if i_showLabels
+        label.new(bar_index, high, "Context Close", style=label.style_label_down, color=color.new(#7B2D8B, 45), textcolor=color.white, size=size.tiny)
+
+if _nyOpen
+    line.new(bar_index, _lineTop, bar_index, _lineBot, color=color.new(#00AAAA, 50), style=line.style_dotted, width=1)
+    if i_showLabels
+        label.new(bar_index, low, "NY Open",       style=label.style_label_up,   color=color.new(#00AAAA, 45), textcolor=color.white, size=size.tiny)
+
+if _nyClose
+    line.new(bar_index, _lineTop, bar_index, _lineBot, color=color.new(#00AAAA, 50), style=line.style_dotted, width=1)
+    if i_showLabels
+        label.new(bar_index, low, "NY Close",      style=label.style_label_up,   color=color.new(#00AAAA, 45), textcolor=color.white, size=size.tiny)
+
+// -- VOLUME PROFILE - calculo y dibujo al cierre de Context -------------------
+if _ctxClose and i_showVP and array.size(ctxBarV) > 0 and not na(lhLevel) and not na(llLevel)
+    _pMin  = llLevel
+    _pMax  = lhLevel
+    _range = _pMax - _pMin
+    if _range > 0
+        _sz    = _range / i_vpLevels
+        _vols  = array.new_float(i_vpLevels, 0.0)
+        _nBars = array.size(ctxBarV)
+        for b = 0 to _nBars - 1
+            _bH = array.get(ctxBarH, b)
+            _bL = array.get(ctxBarL, b)
+            _bV = array.get(ctxBarV, b)
+            _bR = _bH - _bL
+            if _bR > 0.0
+                for i = 0 to i_vpLevels - 1
+                    _lL = _pMin + i * _sz
+                    _lH = _lL + _sz
+                    _ov = math.max(0.0, math.min(_bH, _lH) - math.max(_bL, _lL))
+                    array.set(_vols, i, array.get(_vols, i) + _bV * _ov / _bR)
+        _maxV = array.max(_vols)
+        _pocI = array.indexof(_vols, _maxV)
+        if _maxV > 0
+            _maxW = math.min(i_vpWidth, _nBars)
+            for i = 0 to i_vpLevels - 1
+                _lL  = _pMin + i * _sz
+                _lH  = _lL + _sz
+                _pct = array.get(_vols, i) / _maxV
+                _w   = math.max(1, math.round(_pct * _maxW))
+                _col = i == _pocI ? color.new(color.yellow, 45) : color.new(color.gray, 65)
+                box.new(ctxOpenBarIdx, _lH, ctxOpenBarIdx + _w, _lL,
+                        border_color=color.new(color.gray, 88),
+                        bgcolor=_col)

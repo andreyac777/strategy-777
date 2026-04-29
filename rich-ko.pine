@@ -3,32 +3,45 @@ strategy("Rich KO", overlay=true, default_qty_type=strategy.fixed, default_qty_v
          process_orders_on_close=true, max_lines_count=500, max_boxes_count=500, max_labels_count=500)
 
 // -- INPUTS -------------------------------------------------------------------
-i_pip       = input.float(1.0,  "Pip Size")
-i_utcOffset = input.int(-6,  "UTC Offset",              minval=-12, maxval=14,  group="Sessions", tooltip="Colombia = -6 | Nueva York EST = -5 | Londres GMT = 0")
-i_ctxStart  = input.int(2,   "Context Start (hora local)", minval=0, maxval=23, group="Sessions", tooltip="Inicio de London = inicio del contexto")
-i_nyStart   = input.int(8,   "NY Start = Context Close",   minval=0, maxval=23, group="Sessions")
-i_nyEndHour = input.int(16,  "NY End Hora  (local)",       minval=0, maxval=23, group="Sessions")
-i_nyEndMin  = input.int(0,   "NY End Minuto",              minval=0, maxval=59, group="Sessions")
-i_showLabels = input.bool(true, "Mostrar etiquetas de sesion", group="Sessions")
-i_showVP   = input.bool(true,  "Mostrar Volume Profile",      group="Volume Profile")
-i_vpLevels = input.int(15,    "Niveles",  minval=5, maxval=30, group="Volume Profile")
-i_vpWidth  = input.int(15,    "Ancho max (barras)", minval=3, maxval=40, group="Volume Profile")
-i_fvgMin    = input.float(3.0,  "FVG Min Size (pips)",        group="FVG / OB")
+i_pip        = input.float(1.0,  "Pip Size")
+i_utcOffset  = input.int(-6,  "UTC Offset",               minval=-12, maxval=14,  group="Sessions", tooltip="Colombia = -5 | Nueva York EST = -5 | Londres GMT = 0")
+i_ctxStart   = input.int(2,   "Context Start (hora local)", minval=0, maxval=23, group="Sessions", tooltip="Inicio de London = inicio del contexto")
+i_nyStart    = input.int(8,   "NY Start = Context Close",   minval=0, maxval=23, group="Sessions")
+i_nyEndHour  = input.int(16,  "NY End Hora  (local)",       minval=0, maxval=23, group="Sessions")
+i_nyEndMin   = input.int(0,   "NY End Minuto",              minval=0, maxval=59, group="Sessions")
+i_showLabels = input.bool(true,  "Mostrar etiquetas de sesion", group="Sessions")
+i_showVP     = input.bool(true,  "Mostrar Volume Profile",      group="Volume Profile")
+i_vpLevels   = input.int(15,     "Niveles",  minval=5, maxval=30,  group="Volume Profile")
+i_vpWidth    = input.int(15,     "Ancho max (barras)", minval=3, maxval=40, group="Volume Profile")
+i_fvgMin     = input.float(3.0,  "FVG Min Size (pips)",         group="FVG / OB")
+i_showEQ     = input.bool(true,  "Equilibrium + Zonas",          group="ICT")
+i_showJudas  = input.bool(true,  "Judas Swing + MSS",            group="ICT")
+i_judasMins  = input.int(30,     "Ventana Judas (min)", minval=5, maxval=90, group="ICT")
+i_show10AM   = input.bool(true,  "Macro 10AM",                   group="ICT")
+i_macro10H   = input.int(10,     "Macro hora local",  minval=0, maxval=23, group="ICT", tooltip="10 AM hora NY. Ajustar segun offset local.")
+i_entryOn    = input.bool(true,  "Entradas post-MSS",            group="ICT")
+i_slBuf      = input.float(2.0,  "Buffer SL (pips)", minval=0.0,  group="ICT")
 
 // -- SESIONES -----------------------------------------------------------------
 _utcHour    = math.floor(time / 3600000) % 24
 _localHour  = (_utcHour + i_utcOffset + 24) % 24
+_localMin   = math.floor(time / 60000) % 60
 _inCtx      = _localHour >= i_ctxStart and _localHour < i_nyStart
 _inNY       = _localHour >= i_nyStart  and _localHour < i_nyEndHour
 
-// -- CONTEXT HIGH / LOW (LH y LL se forman solo dentro del contexto) ----------
-var float _runHigh    = na
-var float _runLow     = na
-var int   _runHighBar = na
-var int   _runLowBar  = na
-var bool  _wasInCtx   = false
+// -- CONTEXT HIGH / LOW -------------------------------------------------------
+var float _runHigh     = na
+var float _runLow      = na
+var int   _runHighBar  = na
+var int   _runLowBar   = na
+var bool  _wasInCtx    = false
+var float ctxFirstOpen = na
+var float ctxLastClose = na
 
 if _inCtx
+    if not _inCtx[1]
+        ctxFirstOpen := open
+    ctxLastClose := close
     if na(_runHigh) or high > _runHigh
         _runHigh    := high
         _runHighBar := bar_index
@@ -36,18 +49,24 @@ if _inCtx
         _runLow    := low
         _runLowBar := bar_index
 
-var float lhLevel = na
-var float llLevel = na
-var int   lhBar   = na
-var int   llBar   = na
+var float lhLevel    = na
+var float llLevel    = na
+var int   lhBar      = na
+var int   llBar      = na
+var float eqLevel    = na
+var bool  ctxBullish = false
+var bool  ctxValid   = false
 
 if _wasInCtx and not _inCtx
-    lhLevel     := _runHigh
-    llLevel     := _runLow
-    lhBar       := _runHighBar
-    llBar       := _runLowBar
-    _runHigh    := na
-    _runLow     := na
+    lhLevel    := _runHigh
+    llLevel    := _runLow
+    lhBar      := _runHighBar
+    llBar      := _runLowBar
+    eqLevel    := (_runHigh + _runLow) / 2
+    ctxBullish := ctxLastClose > ctxFirstOpen
+    ctxValid   := true
+    _runHigh   := na
+    _runLow    := na
     _runHighBar := na
     _runLowBar  := na
 
@@ -59,7 +78,6 @@ var float[] ctxBarH       = array.new_float(0)
 var float[] ctxBarL       = array.new_float(0)
 var float[] ctxBarV       = array.new_float(0)
 
-// -- VOLUME PROFILE - recoleccion de barras Context ---------------------------
 if _inCtx and not _inCtx[1]
     ctxOpenBarIdx := bar_index
     array.clear(ctxBarH)
@@ -76,9 +94,6 @@ _ctxOpen  = _inCtx and not _inCtx[1]
 _ctxClose = not _inCtx and _inCtx[1]
 _nyOpen   = _inNY  and not _inNY[1]
 
-// _nyClose: valida contra el cierre del bar (time_close) con precision de minutos.
-// Dispara en el bar cuyo cierre alcanza i_nyEndHour:i_nyEndMin, no en el siguiente.
-_localMin       = math.floor(time       / 60000) % 60
 _utcCloseHour   = math.floor(time_close / 3600000) % 24
 _localCloseHour = (_utcCloseHour + i_utcOffset + 24) % 24
 _localCloseMin  = math.floor(time_close / 60000) % 60
@@ -89,9 +104,7 @@ _nyClose        = (_localCloseHour * 60 + _localCloseMin) >= _nyEndMinutes
 _lineTop = high * 3
 _lineBot = low  / 3
 
-// -- SESSION BANDS (fijas en tiempo, altura completa del chart) ---------------
-// Se crean al abrir la sesion y se extienden hasta su cierre.
-// El alto/bajo usa el mismo truco que las lineas de borde (fuera del rango visible).
+// -- SESSION BANDS ------------------------------------------------------------
 var box ctxBox = na
 var box nyBox  = na
 
@@ -141,8 +154,8 @@ if _ctxClose and i_showVP and array.size(ctxBarV) > 0 and not na(lhLevel) and no
     _pMax  = lhLevel
     _range = _pMax - _pMin
     if _range > 0
-        _sz   = _range / i_vpLevels
-        _vols = array.new_float(i_vpLevels, 0.0)
+        _sz    = _range / i_vpLevels
+        _vols  = array.new_float(i_vpLevels, 0.0)
         _nBars = array.size(ctxBarV)
         for b = 0 to _nBars - 1
             _bH = array.get(ctxBarH, b)
@@ -236,8 +249,6 @@ if _newBearFVG
     array.push(fvgBull,  false)
 
 // -- OB DETECTION (solo en contexto) ------------------------------------------
-// Desplazamiento: la mecha de la vela actual supera el high/low anterior
-// (no requiere cierre por encima, basta con que lo toque)
 _dispBull  = _inCtx and _inCtx[1] and close > open and high > high[1]
 _dispBear  = _inCtx and _inCtx[1] and close < open and low  < low[1]
 _newBullOB = _dispBull and close[1] < open[1]
@@ -286,8 +297,6 @@ if _newBearOB
     array.push(obBull,  false)
 
 // -- EXTEND + EXPIRE FVG/OB ---------------------------------------------------
-// Al expirar: se deja de extender (se saca del array de tracking) pero el
-// dibujo permanece en el chart para poder estudiar el historial.
 if array.size(fvgBoxes) > 0
     _deadFvg = array.new_bool(0)
     for i = 0 to array.size(fvgBoxes) - 1
@@ -381,6 +390,168 @@ if llAlive and not na(llLine)
         llAlive := false
     else if _nyClose
         llAlive := false
+
+// -- EQUILIBRIUM + DISCOUNT / PREMIUM ZONES -----------------------------------
+var line eqLine  = na
+var box  discBox = na
+var box  premBox = na
+
+if _nyOpen and i_showEQ and ctxValid and not na(eqLevel) and not na(lhLevel) and not na(llLevel)
+    _nyEndUTC_H2 = (i_nyEndHour - i_utcOffset + 24) % 24
+    _nyCloseMs2  = timestamp("UTC", year(time, "UTC"), month(time, "UTC"),
+                             dayofmonth(time, "UTC"), _nyEndUTC_H2, i_nyEndMin)
+    eqLine  := line.new(bar_index, eqLevel, bar_index, eqLevel,
+                        color=color.orange, style=line.style_dashed, width=1)
+    discBox := box.new(time, eqLevel, _nyCloseMs2, llLevel,
+                       xloc=xloc.bar_time,
+                       border_color=color.new(color.green, 60),
+                       bgcolor=color.new(color.green, 87))
+    premBox := box.new(time, lhLevel, _nyCloseMs2, eqLevel,
+                       xloc=xloc.bar_time,
+                       border_color=color.new(color.red, 60),
+                       bgcolor=color.new(color.red, 87))
+
+if _inNY and i_showEQ and not na(eqLine)
+    line.set_x2(eqLine, bar_index)
+
+// Context bias label at NY Open
+if _nyOpen and i_showLabels and ctxValid
+    _biasText  = ctxBullish ? "Bias: BULL" : "Bias: BEAR"
+    _biasColor = ctxBullish ? color.new(color.lime, 20) : color.new(color.red, 20)
+    _biasTC    = ctxBullish ? color.black : color.white
+    _lb = label.new(bar_index, high, _biasText,
+                    style=label.style_label_down, color=_biasColor,
+                    textcolor=_biasTC, size=size.small)
+
+// -- 10AM MACRO ---------------------------------------------------------------
+_macroStartMin = i_macro10H * 60 - 10
+_macroEndMin   = i_macro10H * 60 + 10
+_localTotalMin = _localHour * 60 + _localMin
+_in10AM        = _inNY and _localTotalMin >= _macroStartMin and _localTotalMin < _macroEndMin
+_10AMOpen      = _in10AM and not _in10AM[1]
+
+if _10AMOpen and i_show10AM
+    _sl = line.new(bar_index, _lineTop, bar_index, _lineBot,
+                   color=color.new(color.yellow, 40), style=line.style_dotted, width=1)
+    _lb = i_showLabels ? label.new(bar_index, high, "Macro 10AM",
+                                   style=label.style_label_down,
+                                   color=color.new(color.yellow, 25),
+                                   textcolor=color.black, size=size.tiny) : na
+
+// -- JUDAS SWING + MSS --------------------------------------------------------
+var bool  judasDone  = false
+var bool  judasBull  = false
+var float judasLevel = na
+var int   nyOpenBar  = na
+var bool  mssDone    = false
+var bool  mssBull    = false
+var bool  longArmed  = false
+var bool  shortArmed = false
+
+if _nyOpen
+    judasDone  := false
+    judasBull  := false
+    judasLevel := na
+    nyOpenBar  := bar_index
+    mssDone    := false
+    mssBull    := false
+    longArmed  := false
+    shortArmed := false
+
+_minsSinceNY   = (_localTotalMin - i_nyStart * 60 + 1440) % 1440
+_inJudasWindow = _inNY and _minsSinceNY < i_judasMins
+
+_judasTol = i_slBuf * i_pip
+if i_showJudas and _inJudasWindow and not judasDone and ctxValid
+    if ctxBullish and low <= llLevel + _judasTol
+        judasBull  := true
+        judasLevel := math.min(low, llLevel)
+        judasDone  := true
+        _lb = label.new(bar_index, low, "Judas",
+                        style=label.style_label_up,
+                        color=color.new(color.yellow, 20),
+                        textcolor=color.black, size=size.small)
+    else if not ctxBullish and high >= lhLevel - _judasTol
+        judasBull  := false
+        judasLevel := math.max(high, lhLevel)
+        judasDone  := true
+        _lb = label.new(bar_index, high, "Judas",
+                        style=label.style_label_down,
+                        color=color.new(color.yellow, 20),
+                        textcolor=color.black, size=size.small)
+
+if i_showJudas and judasDone and not mssDone and _inNY
+    if judasBull and close > high[1]
+        mssDone   := true
+        mssBull   := true
+        longArmed := true
+        _lb = label.new(bar_index, low, "MSS+",
+                        style=label.style_label_up,
+                        color=color.new(color.lime, 20),
+                        textcolor=color.black, size=size.small)
+    else if not judasBull and close < low[1]
+        mssDone    := true
+        mssBull    := false
+        shortArmed := true
+        _lb = label.new(bar_index, high, "MSS-",
+                        style=label.style_label_down,
+                        color=color.new(color.red, 20),
+                        textcolor=color.white, size=size.small)
+
+// -- ENTRY LOGIC (post-MSS en FVG/OB en zona correcta) -----------------------
+_doLong  = false
+_doShort = false
+_bSL     = 0.0
+_bTP     = 0.0
+_sSL     = 0.0
+_sTP     = 0.0
+
+if i_entryOn and longArmed and _inNY and strategy.position_size == 0
+    if not na(eqLevel) and not na(judasLevel) and not na(lhLevel) and close < eqLevel
+        if array.size(fvgBoxes) > 0
+            for i = 0 to array.size(fvgBoxes) - 1
+                if array.get(fvgBull, i) and close >= array.get(fvgBots, i) and close <= array.get(fvgTops, i)
+                    _doLong := true
+                    _bSL    := judasLevel - i_slBuf * i_pip
+                    _bTP    := lhLevel
+                    break
+        if not _doLong and array.size(obBoxes) > 0
+            for i = 0 to array.size(obBoxes) - 1
+                if array.get(obBull, i) and close >= array.get(obBots, i) and close <= array.get(obTops, i)
+                    _doLong := true
+                    _bSL    := judasLevel - i_slBuf * i_pip
+                    _bTP    := lhLevel
+                    break
+
+if i_entryOn and shortArmed and _inNY and strategy.position_size == 0
+    if not na(eqLevel) and not na(judasLevel) and not na(llLevel) and close > eqLevel
+        if array.size(fvgBoxes) > 0
+            for i = 0 to array.size(fvgBoxes) - 1
+                if not array.get(fvgBull, i) and close >= array.get(fvgBots, i) and close <= array.get(fvgTops, i)
+                    _doShort := true
+                    _sSL     := judasLevel + i_slBuf * i_pip
+                    _sTP     := llLevel
+                    break
+        if not _doShort and array.size(obBoxes) > 0
+            for i = 0 to array.size(obBoxes) - 1
+                if not array.get(obBull, i) and close >= array.get(obBots, i) and close <= array.get(obTops, i)
+                    _doShort := true
+                    _sSL     := judasLevel + i_slBuf * i_pip
+                    _sTP     := llLevel
+                    break
+
+if _doLong and _bTP > close + 4 * i_pip
+    strategy.entry("Buy", strategy.long)
+    strategy.exit("BX", "Buy", stop=_bSL, limit=_bTP)
+    longArmed := false
+
+if _doShort and _sTP < close - 4 * i_pip
+    strategy.entry("Sell", strategy.short)
+    strategy.exit("SX", "Sell", stop=_sSL, limit=_sTP)
+    shortArmed := false
+
+if _nyClose and strategy.position_size != 0
+    strategy.close_all(comment="NY Close")
 
 // -- TRACK LONG/SHORT STATS MANUALLY ------------------------------------------
 var int   lW           = 0
