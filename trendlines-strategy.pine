@@ -1,7 +1,7 @@
 //@version=6
 strategy("TL Rejections - MTF", shorttitle="TLS", overlay=true,
          max_lines_count=500, max_boxes_count=500, max_labels_count=500,
-         initial_capital=10000, currency=currency.USD,
+         initial_capital=1000000, currency=currency.USD,
          default_qty_type=strategy.fixed, default_qty_value=1,
          process_orders_on_close=true)
 
