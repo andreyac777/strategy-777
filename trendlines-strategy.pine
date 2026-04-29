@@ -269,9 +269,17 @@ if bearSig
     trProfit := box.new(bar_index, _e,  bar_index + 1, _tp,
                         border_color=color.teal, bgcolor=color.new(color.teal, 80))
     trActive := true
+    int    _offS  = i_tpRR >= 3.0 ? 38 : 25
+    string _tpTxtS = "TP 1:" + str.tostring(int(i_tpRR))
+    line _slLineS = line.new(bar_index, _sl, bar_index + 4, _sl,
+                  color=color.new(color.red, 50), width=1)
+    line _tpLineS = line.new(bar_index, _tp, bar_index + _offS, _tp,
+                  color=color.new(#26A69A, 40), width=2)
+    label _tpLblS = label.new(bar_index + _offS, _tp,
+                  _tpTxtS + "  $" + str.tostring(math.round(i_riskUSD * i_tpRR)),
+                  style=label.style_label_left,
+                  color=color.new(#26A69A, 45), textcolor=color.white, size=size.tiny)
     if i_backtesting
-        int   _off = i_tpRR >= 3.0 ? 38 : 25
-        string _tpTxt = "TP 1:" + str.tostring(int(i_tpRR))
         label _lbl = label.new(bar_index, _sl + atrVal * 0.3,
                       "SHORT  Ses: " + _ses +
                       "\nE: "   + str.tostring(_e,  format.mintick) +
@@ -280,14 +288,6 @@ if bearSig
                       "  Profit: $" + str.tostring(math.round(i_riskUSD * i_tpRR)),
                       style=label.style_label_down,
                       color=color.new(i_colH, 10), textcolor=color.white, size=size.small)
-        line _slLine = line.new(bar_index, _sl, bar_index + 4, _sl,
-                      color=color.new(color.red, 50), width=1)
-        line _tpLine = line.new(bar_index, _tp, bar_index + _off, _tp,
-                      color=color.new(#26A69A, 40), width=2)
-        label _tpLbl = label.new(bar_index + _off, _tp,
-                      _tpTxt + "  $" + str.tostring(math.round(i_riskUSD * i_tpRR)),
-                      style=label.style_label_left,
-                      color=color.new(#26A69A, 45), textcolor=color.white, size=size.tiny)
     strategy.entry("SHORT", strategy.short, qty=_qty)
     strategy.exit("SHORT-X", "SHORT", stop=_sl, limit=_tp)
 
@@ -303,9 +303,17 @@ if bullSig
     trProfit := box.new(bar_index, _tp,  bar_index + 1, _e,
                         border_color=color.teal, bgcolor=color.new(color.teal, 80))
     trActive := true
+    int    _offL  = i_tpRR >= 3.0 ? 38 : 25
+    string _tpTxtL = "TP 1:" + str.tostring(int(i_tpRR))
+    line _slLineL = line.new(bar_index, _sl, bar_index + 4, _sl,
+                  color=color.new(color.red, 50), width=1)
+    line _tpLineL = line.new(bar_index, _tp, bar_index + _offL, _tp,
+                  color=color.new(#26A69A, 40), width=2)
+    label _tpLblL = label.new(bar_index + _offL, _tp,
+                  _tpTxtL + "  $" + str.tostring(math.round(i_riskUSD * i_tpRR)),
+                  style=label.style_label_left,
+                  color=color.new(#26A69A, 45), textcolor=color.white, size=size.tiny)
     if i_backtesting
-        int   _off = i_tpRR >= 3.0 ? 38 : 25
-        string _tpTxt = "TP 1:" + str.tostring(int(i_tpRR))
         label _lbl = label.new(bar_index, _sl - atrVal * 0.3,
                       "LONG   Ses: " + _ses +
                       "\nE: "   + str.tostring(_e,  format.mintick) +
@@ -314,14 +322,6 @@ if bullSig
                       "  Profit: $" + str.tostring(math.round(i_riskUSD * i_tpRR)),
                       style=label.style_label_up,
                       color=color.new(i_colL, 10), textcolor=color.white, size=size.small)
-        line _slLine = line.new(bar_index, _sl, bar_index + 4, _sl,
-                      color=color.new(color.red, 50), width=1)
-        line _tpLine = line.new(bar_index, _tp, bar_index + _off, _tp,
-                      color=color.new(#26A69A, 40), width=2)
-        label _tpLbl = label.new(bar_index + _off, _tp,
-                      _tpTxt + "  $" + str.tostring(math.round(i_riskUSD * i_tpRR)),
-                      style=label.style_label_left,
-                      color=color.new(#26A69A, 45), textcolor=color.white, size=size.tiny)
     strategy.entry("LONG", strategy.long, qty=_qty)
     strategy.exit("LONG-X", "LONG", stop=_sl, limit=_tp)
 
