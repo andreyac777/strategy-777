@@ -25,6 +25,7 @@ updated: 2026-04-26
 
 | File | Description |
 |---|---|
+| [[strategy/trendlines-strategy]] | **Estrategia activa** — HTF TL rejections + sessions + fixed risk |
 | [[strategy/goalAndPhilosophy]] | Strategy engine, ceiling/floor box rules |
 | [[strategy/entryRules]] | When to enter and when NOT to enter |
 | [[strategy/visualStyle]] | R/R box design and trade labels |
