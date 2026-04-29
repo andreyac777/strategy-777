@@ -41,8 +41,6 @@ i_nyEndH     = input.int(17, "NY   - Fin UTC",    minval=0, maxval=23, group=GRP
 i_showSesLbl = input.bool(true, "Etiquetas de sesion", group=GRP_SES)
 i_filterSes  = input.string("LD+NY", "Sesion para senales",
                options=["Todas", "LD", "NY", "LD+NY"], group=GRP_SES)
-i_useTradeHours = input.bool(false, "Activar filtro de horario operativo", group=GRP_SES,
-               tooltip="OFF = solo usa el filtro de sesion (LD/NY). ON = ademas filtra por rango de horas UTC.")
 i_tradeStart = input.int(13, "Horario operativo - Inicio (UTC)", minval=0, maxval=23, group=GRP_SES,
                tooltip="UTC-6: 7am local = 13 UTC | UTC-5: 7am = 12 UTC")
 i_tradeEnd   = input.int(17, "Horario operativo - Fin    (UTC)", minval=0, maxval=23, group=GRP_SES,
@@ -149,7 +147,7 @@ bool _sesOK       = switch i_filterSes
     "NY"    => _inNY
     "LD+NY" => _inLD or _inNY
     =>         true
-bool _inTradeHours = not i_useTradeHours or (_utcH >= i_tradeStart and _utcH < i_tradeEnd)
+bool _inTradeHours = _utcH >= i_tradeStart and _utcH < i_tradeEnd
 
 // =============================================================================
 // PIVOTES Y TRENDLINES (best-fit, igual que trendlines.pine)
