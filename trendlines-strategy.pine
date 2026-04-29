@@ -8,13 +8,17 @@ strategy("TL Rejections", shorttitle="TLS", overlay=true,
 // =============================================================================
 // INPUTS
 // =============================================================================
-var GRP_PIV = "Pivotes"
-i_pivPer = input.int(10, "Periodo del pivote",  minval=3,  maxval=50, group=GRP_PIV,
-           tooltip="Barras a cada lado para confirmar un maximo/minimo estructural")
-i_nPiv   = input.int(10, "Pivotes a analizar",  minval=4,  maxval=12, group=GRP_PIV,
-           tooltip="Cuantos pivotes recientes se usan para el best-fit")
-i_atrMult = input.float(0.5, "Tolerancia de toque (xATR)", minval=0.1, maxval=2.0, step=0.1, group=GRP_PIV,
-            tooltip="Margen para considerar que un pivote toca la trendline")
+var GRP_PIV = "Trendlines"
+i_pivPer     = input.int(10, "Periodo del pivote",        minval=3,  maxval=50,   group=GRP_PIV,
+               tooltip="Barras a cada lado para confirmar un maximo/minimo estructural")
+i_nPiv       = input.int(10, "Pivotes a analizar",        minval=4,  maxval=12,   group=GRP_PIV,
+               tooltip="Cuantos pivotes recientes se evaluan para el best-fit")
+i_minTouches = input.int(3,  "Toques minimos para entrar", minval=2, maxval=6,    group=GRP_PIV,
+               tooltip="La trendline necesita al menos N pivotes confirmados para ser valida. 3 recomendado.")
+i_atrMult    = input.float(0.5, "Tolerancia de toque (xATR)", minval=0.1, maxval=2.0, step=0.1, group=GRP_PIV,
+               tooltip="Ventana alrededor de la trendline para detectar el toque")
+i_wickRatio  = input.float(0.25, "Wick minimo (wick/rango)", minval=0.10, maxval=0.80, step=0.05, group=GRP_PIV,
+               tooltip="Fraccion del rango de la vela que debe ser mecha de rechazo. 0.25 recomendado.")
 
 var GRP_SES = "Sesiones"
 i_asiaStartH = input.int(0,  "Asia - Inicio UTC", minval=0, maxval=23, group=GRP_SES)
@@ -26,12 +30,14 @@ i_nyEndH     = input.int(17, "NY   - Fin UTC",    minval=0, maxval=23, group=GRP
 i_showSesLbl = input.bool(true, "Etiquetas de sesion", group=GRP_SES)
 i_filterSes  = input.string("LD+NY", "Sesion para senales",
                options=["Todas", "LD", "NY", "LD+NY"], group=GRP_SES)
+i_tradeStart = input.int(13, "Horario operativo - Inicio (UTC)", minval=0, maxval=23, group=GRP_SES,
+               tooltip="UTC-6: 7am local = 13 UTC | UTC-5: 7am = 12 UTC")
+i_tradeEnd   = input.int(17, "Horario operativo - Fin    (UTC)", minval=0, maxval=23, group=GRP_SES,
+               tooltip="UTC-6: 11am local = 17 UTC")
 
 var GRP_RISK = "Gestion de Riesgo"
 i_riskUSD    = input.float(60.0, "Riesgo fijo por operacion (USD)", minval=1.0, step=5.0, group=GRP_RISK)
 i_slBuf      = input.float(0.3,  "SL buffer (xATR sobre el pivote)", minval=0.0, maxval=3.0, step=0.1, group=GRP_RISK)
-i_tpRR       = input.float(2.0,  "TP ratio (1:X)", minval=1.0, maxval=5.0, step=0.5, group=GRP_RISK,
-               tooltip="El exit real usa este ratio. Default 1:2.")
 i_backtesting = input.bool(false, "Mostrar etiquetas (backtesting)", group=GRP_RISK)
 
 var GRP_VIS = "Visual"
@@ -121,11 +127,12 @@ if i_showSesLbl
         label _ln = label.new(bar_index, high, "NY", style=label.style_label_down,
                      color=color.new(#00AAAA, 40), textcolor=color.white, size=size.tiny)
 
-bool _sesOK = switch i_filterSes
+bool _sesOK       = switch i_filterSes
     "LD"    => _inLD
     "NY"    => _inNY
     "LD+NY" => _inLD or _inNY
     =>         true
+bool _inTradeHours = _utcH >= i_tradeStart and _utcH < i_tradeEnd
 
 // =============================================================================
 // PIVOTES Y TRENDLINES (best-fit, igual que trendlines.pine)
@@ -144,10 +151,12 @@ var float[] _pL_v = array.new_float(12, float(na))
 var line _tlH = na
 var line _tlL = na
 
-var int   _tlH_b1 = int(na),   var float _tlH_v1 = float(na)
-var int   _tlH_b2 = int(na),   var float _tlH_v2 = float(na)
-var int   _tlL_b1 = int(na),   var float _tlL_v1 = float(na)
-var int   _tlL_b2 = int(na),   var float _tlL_v2 = float(na)
+var int   _tlH_b1    = int(na),   var float _tlH_v1 = float(na)
+var int   _tlH_b2    = int(na),   var float _tlH_v2 = float(na)
+var int   _tlL_b1    = int(na),   var float _tlL_v1 = float(na)
+var int   _tlL_b2    = int(na),   var float _tlL_v2 = float(na)
+var int   _tlH_score = 0
+var int   _tlL_score = 0
 
 f_push(int[] bars, float[] vals, int b, float v) =>
     array.shift(bars)
@@ -187,7 +196,7 @@ f_bestFit(int[] bars, float[] vals, float ftol, int nPiv) =>
                 bestV1 := vi
                 bestB2 := bj
                 bestV2 := vj
-    [bestB1, bestV1, bestB2, bestV2]
+    [bestB1, bestV1, bestB2, bestV2, bestScore]
 
 f_proj(int b1, float v1, int b2, float v2) =>
     (not na(b2) ?
@@ -198,132 +207,171 @@ f_proj(int b1, float v1, int b2, float v2) =>
 
 if not na(pivH)
     f_push(_pH_b, _pH_v, bar_index - i_pivPer, pivH)
-    [b1, v1, b2, v2] = f_bestFit(_pH_b, _pH_v, _tol, i_nPiv)
+    [b1, v1, b2, v2, sc] = f_bestFit(_pH_b, _pH_v, _tol, i_nPiv)
     if not na(b1)
         line.delete(_tlH)
-        _tlH   := line.new(b1, v1, b2, v2, color=i_colH, width=2, extend=extend.right)
-        _tlH_b1 := b1,  _tlH_v1 := v1
-        _tlH_b2 := b2,  _tlH_v2 := v2
+        _tlH      := line.new(b1, v1, b2, v2, color=i_colH,
+                             width=sc >= i_minTouches ? 3 : 1, extend=extend.right)
+        _tlH_b1   := b1,  _tlH_v1 := v1
+        _tlH_b2   := b2,  _tlH_v2 := v2
+        _tlH_score := sc
 
 if not na(pivL)
     f_push(_pL_b, _pL_v, bar_index - i_pivPer, pivL)
-    [b1, v1, b2, v2] = f_bestFit(_pL_b, _pL_v, _tol, i_nPiv)
+    [b1, v1, b2, v2, sc] = f_bestFit(_pL_b, _pL_v, _tol, i_nPiv)
     if not na(b1)
         line.delete(_tlL)
-        _tlL   := line.new(b1, v1, b2, v2, color=i_colL, width=2, extend=extend.right)
-        _tlL_b1 := b1,  _tlL_v1 := v1
-        _tlL_b2 := b2,  _tlL_v2 := v2
+        _tlL      := line.new(b1, v1, b2, v2, color=i_colL,
+                             width=sc >= i_minTouches ? 3 : 1, extend=extend.right)
+        _tlL_b1   := b1,  _tlL_v1 := v1
+        _tlL_b2   := b2,  _tlL_v2 := v2
+        _tlL_score := sc
 
 float tlH_now = f_proj(_tlH_b1, _tlH_v1, _tlH_b2, _tlH_v2)
 float tlL_now = f_proj(_tlL_b1, _tlL_v1, _tlL_b2, _tlL_v2)
 
-// Marcadores de pivote (identicos a trendlines.pine)
-plotshape(not na(pivH), "Alto", location=location.abovebar,
-          color=i_colH, style=shape.triangledown, size=size.tiny, offset=-i_pivPer)
-plotshape(not na(pivL), "Bajo", location=location.belowbar,
-          color=i_colL, style=shape.triangleup, size=size.tiny, offset=-i_pivPer)
-
 // =============================================================================
-// SENALES: pivote confirmado cerca de su trendline + sesion activa
-// El pivote acaba de ser confirmado (i_pivPer barras despues del maximo/minimo).
-// Condicion: el valor del pivote cae dentro de la tolerancia de la trendline.
+// SENALES: wick de rechazo contra la trendline proyectada al bar actual
+// La trendline debe tener al menos i_minTouches pivotes confirmados.
+// Entrada inmediata en el close del bar de rechazo.
 // =============================================================================
-float _tlH_atPiv = f_proj(_tlH_b1, _tlH_v1, _tlH_b2, _tlH_v2 - i_pivPer)
-float _tlL_atPiv = f_proj(_tlL_b1, _tlL_v1, _tlL_b2, _tlL_v2 - i_pivPer)
+float _range  = high - low
+float _upWick = high - math.max(open, close)
+float _dnWick = math.min(open, close) - low
 
-bool bearSig = (not na(pivH) and not na(_tlH_b2)
-    and math.abs(pivH - tlH_now) <= _tol * 2.0
-    and _sesOK
+f_bearRej(float lvl) =>
+    (not na(lvl) and _range > 0
+    and high >= lvl - _tol
+    and high <= lvl + _tol * 1.5
+    and close[1] < lvl - _tol * 0.3
+    and _upWick / _range >= i_wickRatio)
+
+f_bullRej(float lvl) =>
+    (not na(lvl) and _range > 0
+    and low <= lvl + _tol
+    and low >= lvl - _tol * 1.5
+    and close[1] > lvl + _tol * 0.3
+    and _dnWick / _range >= i_wickRatio)
+
+bool bearSig = (f_bearRej(tlH_now)
+    and _tlH_score >= i_minTouches
+    and _sesOK and _inTradeHours
     and strategy.position_size == 0)
 
-bool bullSig = (not na(pivL) and not na(_tlL_b2)
-    and math.abs(pivL - tlL_now) <= _tol * 2.0
-    and _sesOK
+bool bullSig = (f_bullRej(tlL_now)
+    and _tlL_score >= i_minTouches
+    and _sesOK and _inTradeHours
     and strategy.position_size == 0)
+
+plotshape(bearSig, "SHORT entrada", location=location.abovebar,
+          color=i_colH, style=shape.triangledown, size=size.small)
+plotshape(bullSig, "LONG entrada",  location=location.belowbar,
+          color=i_colL, style=shape.triangleup,   size=size.small)
 
 // =============================================================================
 // ENTRADAS + CAJAS R/R (siempre visibles, patron acc-scalping)
 // =============================================================================
-var bool trActive = false
-var box  trRisk   = na
-var box  trProfit = na
-var int  nClosed  = 0
+var bool  trActive = false
+var box   trRisk   = na
+var box   trProfit = na
+var int   nClosed  = 0
+var float trSL     = float(na)
+var float trTP     = float(na)
+var bool  trLong   = false
 
 if trActive
-    box.set_right(trRisk,   bar_index)
-    box.set_right(trProfit, bar_index)
-
-if strategy.closedtrades > nClosed
-    nClosed  := strategy.closedtrades
-    trActive := false
+    bool _hitSL = trLong ? low  <= trSL : high >= trSL
+    bool _hitTP = trLong ? high >= trTP : low  <= trTP
+    if _hitSL or _hitTP or strategy.closedtrades > nClosed
+        trActive := false
+        nClosed  := strategy.closedtrades
+    else
+        box.set_right(trRisk,   bar_index)
+        box.set_right(trProfit, bar_index)
 
 if bearSig
-    float _sl     = pivH + atrVal * i_slBuf
+    float _sl     = high + atrVal * i_slBuf
     float _e      = close
     float _slDist = _sl - _e
     float _qty    = i_riskUSD / _slDist
-    float _tp     = _e - _slDist * i_tpRR
+    float _tp2    = _e - _slDist * 2
+    float _tp3    = _e - _slDist * 3
     string _ses   = _inLD ? "LD" : (_inNY ? "NY" : "---")
     trRisk   := box.new(bar_index, _sl, bar_index + 1, _e,
                         border_color=color.red,  bgcolor=color.new(color.red,  80))
-    trProfit := box.new(bar_index, _e,  bar_index + 1, _tp,
+    trProfit := box.new(bar_index, _e,  bar_index + 1, _tp2,
                         border_color=color.teal, bgcolor=color.new(color.teal, 80))
     trActive := true
-    int    _offS  = i_tpRR >= 3.0 ? 38 : 25
-    string _tpTxtS = "TP 1:" + str.tostring(int(i_tpRR))
-    line _slLineS = line.new(bar_index, _sl, bar_index + 4, _sl,
-                  color=color.new(color.red, 50), width=1)
-    line _tpLineS = line.new(bar_index, _tp, bar_index + _offS, _tp,
-                  color=color.new(#26A69A, 40), width=2)
-    label _tpLblS = label.new(bar_index + _offS, _tp,
-                  _tpTxtS + "  $" + str.tostring(math.round(i_riskUSD * i_tpRR)),
-                  style=label.style_label_left,
-                  color=color.new(#26A69A, 45), textcolor=color.white, size=size.tiny)
+    trSL     := _sl
+    trTP     := _tp2
+    trLong   := false
+    line _slLineS  = line.new(bar_index, _sl,  bar_index + 4,  _sl,
+                    color=color.new(color.red, 50), width=1)
+    line _tp2LineS = line.new(bar_index, _tp2, bar_index + 25, _tp2,
+                    color=color.new(#26A69A, 40), width=2)
+    label _tp2LblS = label.new(bar_index + 25, _tp2,
+                    "TP 1:2  $" + str.tostring(math.round(i_riskUSD * 2)),
+                    style=label.style_label_left,
+                    color=color.new(#26A69A, 45), textcolor=color.white, size=size.tiny)
+    line _tp3LineS = line.new(bar_index, _tp3, bar_index + 38, _tp3,
+                    color=color.new(#26A69A, 65), width=1, style=line.style_dashed)
+    label _tp3LblS = label.new(bar_index + 38, _tp3,
+                    "TP 1:3  $" + str.tostring(math.round(i_riskUSD * 3)),
+                    style=label.style_label_left,
+                    color=color.new(#26A69A, 65), textcolor=color.white, size=size.tiny)
     if i_backtesting
         label _lbl = label.new(bar_index, _sl + atrVal * 0.3,
                       "SHORT  Ses: " + _ses +
                       "\nE: "   + str.tostring(_e,  format.mintick) +
                       "  SL: " + str.tostring(_sl, format.mintick) +
                       "\nRiesgo: $"  + str.tostring(math.round(i_riskUSD)) +
-                      "  Profit: $" + str.tostring(math.round(i_riskUSD * i_tpRR)),
+                      "  Profit 1:2: $" + str.tostring(math.round(i_riskUSD * 2)),
                       style=label.style_label_down,
                       color=color.new(i_colH, 10), textcolor=color.white, size=size.small)
     strategy.entry("SHORT", strategy.short, qty=_qty)
-    strategy.exit("SHORT-X", "SHORT", stop=_sl, limit=_tp)
+    strategy.exit("SHORT-X", "SHORT", stop=_sl, limit=_tp2)
 
 if bullSig
-    float _sl     = pivL - atrVal * i_slBuf
+    float _sl     = low - atrVal * i_slBuf
     float _e      = close
     float _slDist = _e - _sl
     float _qty    = i_riskUSD / _slDist
-    float _tp     = _e + _slDist * i_tpRR
+    float _tp2    = _e + _slDist * 2
+    float _tp3    = _e + _slDist * 3
     string _ses   = _inLD ? "LD" : (_inNY ? "NY" : "---")
     trRisk   := box.new(bar_index, _e,   bar_index + 1, _sl,
                         border_color=color.red,  bgcolor=color.new(color.red,  80))
-    trProfit := box.new(bar_index, _tp,  bar_index + 1, _e,
+    trProfit := box.new(bar_index, _tp2, bar_index + 1, _e,
                         border_color=color.teal, bgcolor=color.new(color.teal, 80))
     trActive := true
-    int    _offL  = i_tpRR >= 3.0 ? 38 : 25
-    string _tpTxtL = "TP 1:" + str.tostring(int(i_tpRR))
-    line _slLineL = line.new(bar_index, _sl, bar_index + 4, _sl,
-                  color=color.new(color.red, 50), width=1)
-    line _tpLineL = line.new(bar_index, _tp, bar_index + _offL, _tp,
-                  color=color.new(#26A69A, 40), width=2)
-    label _tpLblL = label.new(bar_index + _offL, _tp,
-                  _tpTxtL + "  $" + str.tostring(math.round(i_riskUSD * i_tpRR)),
-                  style=label.style_label_left,
-                  color=color.new(#26A69A, 45), textcolor=color.white, size=size.tiny)
+    trSL     := _sl
+    trTP     := _tp2
+    trLong   := true
+    line _slLineL  = line.new(bar_index, _sl,  bar_index + 4,  _sl,
+                    color=color.new(color.red, 50), width=1)
+    line _tp2LineL = line.new(bar_index, _tp2, bar_index + 25, _tp2,
+                    color=color.new(#26A69A, 40), width=2)
+    label _tp2LblL = label.new(bar_index + 25, _tp2,
+                    "TP 1:2  $" + str.tostring(math.round(i_riskUSD * 2)),
+                    style=label.style_label_left,
+                    color=color.new(#26A69A, 45), textcolor=color.white, size=size.tiny)
+    line _tp3LineL = line.new(bar_index, _tp3, bar_index + 38, _tp3,
+                    color=color.new(#26A69A, 65), width=1, style=line.style_dashed)
+    label _tp3LblL = label.new(bar_index + 38, _tp3,
+                    "TP 1:3  $" + str.tostring(math.round(i_riskUSD * 3)),
+                    style=label.style_label_left,
+                    color=color.new(#26A69A, 65), textcolor=color.white, size=size.tiny)
     if i_backtesting
         label _lbl = label.new(bar_index, _sl - atrVal * 0.3,
                       "LONG   Ses: " + _ses +
                       "\nE: "   + str.tostring(_e,  format.mintick) +
                       "  SL: " + str.tostring(_sl, format.mintick) +
                       "\nRiesgo: $"  + str.tostring(math.round(i_riskUSD)) +
-                      "  Profit: $" + str.tostring(math.round(i_riskUSD * i_tpRR)),
+                      "  Profit 1:2: $" + str.tostring(math.round(i_riskUSD * 2)),
                       style=label.style_label_up,
                       color=color.new(i_colL, 10), textcolor=color.white, size=size.small)
     strategy.entry("LONG", strategy.long, qty=_qty)
-    strategy.exit("LONG-X", "LONG", stop=_sl, limit=_tp)
+    strategy.exit("LONG-X", "LONG", stop=_sl, limit=_tp2)
 
 // =============================================================================
 // ALERTAS
