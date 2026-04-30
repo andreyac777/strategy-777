@@ -1,2 +1,5 @@
 # OS
 .DS_Store
+
+# Claude Code local settings (no incluye comandos custom en .claude/commands/)
+.claude/settings.local.json
