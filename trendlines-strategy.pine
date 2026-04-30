@@ -21,6 +21,20 @@ i_wickRatio  = input.float(0.25, "Wick minimo (wick/rango)", minval=0.10, maxval
                tooltip="Fraccion del rango de la vela que debe ser mecha de rechazo. 0.25 recomendado.")
 i_minSpacing = input.int(20, "Min barras entre toques", minval=3, maxval=100, group=GRP_PIV,
                tooltip="Barras minimas entre dos toques validos de la misma TL. Evita que una consolidacion infle el score. 20 barras = 100 min en 5m.")
+i_minSpreadATR  = input.float(2.0, "Spread min B-A para BK (xATR)", minval=0.5, maxval=10.0, step=0.5, group=GRP_PIV,
+               tooltip="Filtro secundario de consolidacion para senales BK. Si la pendiente no clasifica, se requiere este spread minimo entre 1B y 1A.")
+i_bkConfirmBars = input.int(3, "Barras confirmacion break", minval=2, maxval=10, group=GRP_PIV,
+               tooltip="Barras consecutivas que debe cerrar mas alla de la TL para validar el break. 2 = posible Judas, 3+ = break real.")
+i_bkMinATR      = input.float(0.3, "Distancia minima break (xATR)", minval=0.1, maxval=3.0, step=0.1, group=GRP_PIV,
+               tooltip="El cierre debe estar al menos N*ATR mas alla de la TL para contar como barra de break.")
+i_bkDupATR      = input.float(0.5, "Tolerancia BK duplicada (xATR)", minval=0.0, maxval=3.0, step=0.1, group=GRP_PIV,
+               tooltip="Si la nueva BK proyecta dentro de N*ATR de la BK actual, se considera la misma tendencia y NO se crea duplicado. 0 = desactivar guard.")
+i_bkJudasBars   = input.int(8, "Barras vigilancia Judas", minval=2, maxval=30, group=GRP_PIV,
+               tooltip="Barras post-break en las que se vigila si el precio retorna al lado original. Si retorna, la BK se invalida y se etiqueta JUDAS.")
+i_bkJudasATR    = input.float(0.3, "Distancia retorno Judas (xATR)", minval=0.1, maxval=3.0, step=0.1, group=GRP_PIV,
+               tooltip="Si dentro de la ventana, el precio cierra a esta distancia del lado original de la BK, se considera Judas y se invalida.")
+i_bkMinTouches  = input.int(3, "Toques minimos de TL para promover a BK", minval=2, maxval=6, group=GRP_PIV,
+               tooltip="Una TL solo puede ser rota y promovida a BK si tenia al menos N toques. Evita que TLs estructuralmente debiles (recien formadas con 2 anclajes) generen BKs prematuras. Recomendado: igual a 'Toques minimos para entrar'.")
 
 var GRP_HTF = "Confluencia HTF"
 i_htf1TF     = input.timeframe("60",  "HTF1 - Timeframe",             group=GRP_HTF)
@@ -52,8 +66,9 @@ i_slBuf      = input.float(0.3,  "SL buffer (xATR sobre el pivote)", minval=0.0,
 i_backtesting = input.bool(false, "Mostrar etiquetas (backtesting)", group=GRP_RISK)
 
 var GRP_VIS = "Visual"
-i_colH    = input.color(#00bfff, "Color resistencia", group=GRP_VIS)
-i_colL    = input.color(#ff5252, "Color soporte",     group=GRP_VIS)
+i_colH    = input.color(#00bfff, "Color resistencia (B)",  group=GRP_VIS)
+i_colL    = input.color(#CE93D8, "Color soporte (A)",     group=GRP_VIS)
+i_colBK   = input.color(#ff5252, "Color break (BK)",      group=GRP_VIS)
 i_colAsia = input.color(color.new(color.white, 90), "Asia fondo", group=GRP_VIS)
 i_colLD   = input.color(color.new(#9B59B6, 87),     "LD fondo",   group=GRP_VIS)
 i_colNY    = input.color(color.new(#00EFEF, 90),     "NY fondo",        group=GRP_VIS)
@@ -179,6 +194,38 @@ var int   _b1L_prv = int(na),     var float _v1L_prv = float(na)
 var int   _b2L_prv = int(na),     var float _v2L_prv = float(na)
 var int   _tlH_score = 0
 var int   _tlL_score = 0
+var label _lbl1B = na,   var label _lbl1A = na
+var label _lbl2B = na,   var label _lbl2A = na
+var label _dbgH  = na,   var label _dbgL  = na
+var label _lblH1B = na,  var label _lblH1A = na
+var label _lblH4B = na,  var label _lblH4A = na
+var label _lbl1BK = na,  var label _lbl2BK = na
+
+// BK: TL rota usada como soporte/resistencia (role reversal)
+var line  _tlBK_cur = na,      var line  _tlBK_prv = na
+var int   _scBK_cur = 0,       var int   _scBK_prv = 0
+var int   _b1BK_cur = int(na), var float _v1BK_cur = float(na)
+var int   _b2BK_cur = int(na), var float _v2BK_cur = float(na)
+var int   _b1BK_prv = int(na), var float _v1BK_prv = float(na)
+var int   _b2BK_prv = int(na), var float _v2BK_prv = float(na)
+var bool  _bkFromH_cur = false  // true = B rota -> LONG retest | false = A rota -> SHORT retest
+var bool  _bkFromH_prv = false
+var bool  _bkSlope_cur = false  // pendiente confirma tendencia en el momento del break
+var bool  _bkSlope_prv = false
+var int   _tlBK_score  = 0
+// debounce: evita registrar el mismo break dos veces
+var int   _bkH_src_b2  = int(na)
+var int   _bkL_src_b2  = int(na)
+// Ventana de vigilancia Judas - bar_index hasta el cual la BK actual sigue en evaluacion
+var int   _bk_judas_until = int(na)
+// contadores de barras consecutivas con cierre mas alla de la TL
+var int   _bkH_cnt_cur = 0
+var int   _bkH_cnt_prv = 0
+var int   _bkL_cnt_cur = 0
+var int   _bkL_cnt_prv = 0
+// tracking de cual slot H/L esta activo para senales
+var bool  _tlH_from_prv = false
+var bool  _tlL_from_prv = false
 
 f_push(int[] bars, float[] vals, int b, float v) =>
     array.shift(bars)
@@ -291,6 +338,10 @@ if not na(_h1rP2) and not na(_h1rP1) and _h1rP2 != _prev_h1rP2
     _htf1H_line := line.new(_h1rT1, _h1rP1, _h1rT2, _h1rP2,
                             xloc=xloc.bar_time, extend=extend.right,
                             color=i_colHTF1H, width=2, style=line.style_dashed)
+    label.delete(_lblH1B)
+    _lblH1B := label.new(bar_index + 3, _h1rP2, "H1B",
+                         color=color.new(i_colHTF1H, 70), textcolor=i_colHTF1H,
+                         style=label.style_label_left, size=size.small)
     _prev_h1rP2 := _h1rP2
 
 if not na(_h1sP2) and not na(_h1sP1) and _h1sP2 != _prev_h1sP2
@@ -298,6 +349,10 @@ if not na(_h1sP2) and not na(_h1sP1) and _h1sP2 != _prev_h1sP2
     _htf1L_line := line.new(_h1sT1, _h1sP1, _h1sT2, _h1sP2,
                             xloc=xloc.bar_time, extend=extend.right,
                             color=i_colHTF1L, width=2, style=line.style_dashed)
+    label.delete(_lblH1A)
+    _lblH1A := label.new(bar_index + 3, _h1sP2, "H1A",
+                         color=color.new(i_colHTF1L, 70), textcolor=i_colHTF1L,
+                         style=label.style_label_left, size=size.small)
     _prev_h1sP2 := _h1sP2
 
 if not na(_h2rP2) and not na(_h2rP1) and _h2rP2 != _prev_h2rP2
@@ -305,6 +360,10 @@ if not na(_h2rP2) and not na(_h2rP1) and _h2rP2 != _prev_h2rP2
     _htf2H_line := line.new(_h2rT1, _h2rP1, _h2rT2, _h2rP2,
                             xloc=xloc.bar_time, extend=extend.right,
                             color=i_colHTF2H, width=3, style=line.style_solid)
+    label.delete(_lblH4B)
+    _lblH4B := label.new(bar_index + 3, _h2rP2, "H4B",
+                         color=color.new(i_colHTF2H, 70), textcolor=i_colHTF2H,
+                         style=label.style_label_left, size=size.small)
     _prev_h2rP2 := _h2rP2
 
 if not na(_h2sP2) and not na(_h2sP1) and _h2sP2 != _prev_h2sP2
@@ -312,6 +371,10 @@ if not na(_h2sP2) and not na(_h2sP1) and _h2sP2 != _prev_h2sP2
     _htf2L_line := line.new(_h2sT1, _h2sP1, _h2sT2, _h2sP2,
                             xloc=xloc.bar_time, extend=extend.right,
                             color=i_colHTF2L, width=3, style=line.style_solid)
+    label.delete(_lblH4A)
+    _lblH4A := label.new(bar_index + 3, _h2sP2, "H4A",
+                         color=color.new(i_colHTF2L, 70), textcolor=i_colHTF2L,
+                         style=label.style_label_left, size=size.small)
     _prev_h2sP2 := _h2sP2
 
 f_scoreBear(float lvl) =>
@@ -370,31 +433,51 @@ if not na(pivH)
     if not na(b1)
         bool _newH = na(_b2H_cur) or b2 != _b2H_cur or b1 != _b1H_cur
         if _newH
+            // old prv (2 generaciones) se elimina
             line.delete(_tlH_prv)
-            _tlH_prv := _tlH_cur,  _scH_prv := _scH_cur
+            label.delete(_lbl2B)
+            // cur se convierte en el nuevo prv (la linea se reutiliza, solo se desvanece)
             _b1H_prv := _b1H_cur,  _v1H_prv := _v1H_cur
             _b2H_prv := _b2H_cur,  _v2H_prv := _v2H_cur
+            _scH_prv  := _scH_cur
+            _tlH_prv  := _tlH_cur
+            if not na(_tlH_prv)
+                line.set_color(_tlH_prv, color.new(i_colH, 40))
+                line.set_width(_tlH_prv, 1)
+                label.delete(_lbl1B)
+                _lbl2B := label.new(bar_index + 3, _v2H_prv, "2B",
+                                    color=color.new(i_colH, 85), textcolor=i_colH,
+                                    style=label.style_label_left, size=size.small)
+                _lbl1B := na
+            else
+                label.delete(_lbl1B)
+                _lbl1B  := na
+                _lbl2B  := na
+            // nueva cur empieza tenue
             _tlH_cur  := line.new(b1, v1, b2, v2,
                                   color=color.new(i_colH, f_tlAlpha(sc)),
                                   width=sc >= i_minTouches ? 2 : 1, extend=extend.right)
+            _lbl1B := label.new(bar_index + 3, v2, "1B",
+                                color=color.new(i_colH, 70), textcolor=i_colH,
+                                style=label.style_label_left, size=size.small)
             _b1H_cur := b1,  _v1H_cur := v1
             _b2H_cur := b2,  _v2H_cur := v2
             _scH_cur  := sc
-            if not na(_tlH_prv)
-                int _aP = math.min(100, f_tlAlpha(_scH_prv) + sc * 25)
-                line.set_color(_tlH_prv, color.new(i_colH, _aP))
-                line.set_width(_tlH_prv, 1)
+            _bkH_cnt_prv := _bkH_cnt_cur
+            _bkH_cnt_cur := 0
         else
             _scH_cur := sc
             line.set_color(_tlH_cur, color.new(i_colH, f_tlAlpha(sc)))
             line.set_width(_tlH_cur, sc >= i_minTouches ? 2 : 1)
             if not na(_tlH_prv)
-                int _aP = math.min(100, f_tlAlpha(_scH_prv) + sc * 25)
+                int _aP = math.min(100, 40 + _scH_cur * 20)
                 if _aP >= 98
                     line.delete(_tlH_prv)
                     _tlH_prv := na,      _scH_prv := 0
                     _b1H_prv := int(na), _v1H_prv := float(na)
                     _b2H_prv := int(na), _v2H_prv := float(na)
+                    label.delete(_lbl2B)
+                    _lbl2B := na
                 else
                     line.set_color(_tlH_prv, color.new(i_colH, _aP))
 
@@ -405,30 +488,47 @@ if not na(pivL)
         bool _newL = na(_b2L_cur) or b2 != _b2L_cur or b1 != _b1L_cur
         if _newL
             line.delete(_tlL_prv)
-            _tlL_prv := _tlL_cur,  _scL_prv := _scL_cur
+            label.delete(_lbl2A)
             _b1L_prv := _b1L_cur,  _v1L_prv := _v1L_cur
             _b2L_prv := _b2L_cur,  _v2L_prv := _v2L_cur
+            _scL_prv  := _scL_cur
+            _tlL_prv  := _tlL_cur
+            if not na(_tlL_prv)
+                line.set_color(_tlL_prv, color.new(i_colL, 40))
+                line.set_width(_tlL_prv, 1)
+                label.delete(_lbl1A)
+                _lbl2A := label.new(bar_index + 3, _v2L_prv, "2A",
+                                    color=color.new(i_colL, 85), textcolor=i_colL,
+                                    style=label.style_label_left, size=size.small)
+                _lbl1A := na
+            else
+                label.delete(_lbl1A)
+                _lbl1A  := na
+                _lbl2A  := na
             _tlL_cur  := line.new(b1, v1, b2, v2,
                                   color=color.new(i_colL, f_tlAlpha(sc)),
                                   width=sc >= i_minTouches ? 2 : 1, extend=extend.right)
+            _lbl1A := label.new(bar_index + 3, v2, "1A",
+                                color=color.new(i_colL, 70), textcolor=i_colL,
+                                style=label.style_label_left, size=size.small)
             _b1L_cur := b1,  _v1L_cur := v1
             _b2L_cur := b2,  _v2L_cur := v2
             _scL_cur  := sc
-            if not na(_tlL_prv)
-                int _aP = math.min(100, f_tlAlpha(_scL_prv) + sc * 25)
-                line.set_color(_tlL_prv, color.new(i_colL, _aP))
-                line.set_width(_tlL_prv, 1)
+            _bkL_cnt_prv := _bkL_cnt_cur
+            _bkL_cnt_cur := 0
         else
             _scL_cur := sc
             line.set_color(_tlL_cur, color.new(i_colL, f_tlAlpha(sc)))
             line.set_width(_tlL_cur, sc >= i_minTouches ? 2 : 1)
             if not na(_tlL_prv)
-                int _aP = math.min(100, f_tlAlpha(_scL_prv) + sc * 25)
+                int _aP = math.min(100, 40 + _scL_cur * 20)
                 if _aP >= 98
                     line.delete(_tlL_prv)
                     _tlL_prv := na,      _scL_prv := 0
                     _b1L_prv := int(na), _v1L_prv := float(na)
                     _b2L_prv := int(na), _v2L_prv := float(na)
+                    label.delete(_lbl2A)
+                    _lbl2A := na
                 else
                     line.set_color(_tlL_prv, color.new(i_colL, _aP))
 
@@ -440,30 +540,338 @@ float _prvH_now = f_proj(_b1H_prv, _v1H_prv, _b2H_prv, _v2H_prv)
 float _curL_now = f_proj(_b1L_cur, _v1L_cur, _b2L_cur, _v2L_cur)
 float _prvL_now = f_proj(_b1L_prv, _v1L_prv, _b2L_prv, _v2L_prv)
 
+if not na(_lbl1B) and not na(_curH_now)
+    label.set_x(_lbl1B, bar_index + 3)
+    label.set_y(_lbl1B, _curH_now)
+if not na(_lbl2B) and not na(_prvH_now)
+    label.set_x(_lbl2B, bar_index + 3)
+    label.set_y(_lbl2B, _prvH_now)
+if not na(_lbl1A) and not na(_curL_now)
+    label.set_x(_lbl1A, bar_index + 3)
+    label.set_y(_lbl1A, _curL_now)
+if not na(_lbl2A) and not na(_prvL_now)
+    label.set_x(_lbl2A, bar_index + 3)
+    label.set_y(_lbl2A, _prvL_now)
+if not na(_lblH1B) and not na(htf1H_now)
+    label.set_x(_lblH1B, bar_index + 3)
+    label.set_y(_lblH1B, htf1H_now)
+if not na(_lblH1A) and not na(htf1L_now)
+    label.set_x(_lblH1A, bar_index + 3)
+    label.set_y(_lblH1A, htf1L_now)
+if not na(_lblH4B) and not na(htf2H_now)
+    label.set_x(_lblH4B, bar_index + 3)
+    label.set_y(_lblH4B, htf2H_now)
+if not na(_lblH4A) and not na(htf2L_now)
+    label.set_x(_lblH4A, bar_index + 3)
+    label.set_y(_lblH4A, htf2L_now)
+float _bkCurNow = f_proj(_b1BK_cur, _v1BK_cur, _b2BK_cur, _v2BK_cur)
+float _bkPrvNow = f_proj(_b1BK_prv, _v1BK_prv, _b2BK_prv, _v2BK_prv)
+if not na(_lbl1BK) and not na(_bkCurNow)
+    label.set_x(_lbl1BK, bar_index + 3)
+    label.set_y(_lbl1BK, _bkCurNow)
+if not na(_lbl2BK) and not na(_bkPrvNow)
+    label.set_x(_lbl2BK, bar_index + 3)
+    label.set_y(_lbl2BK, _bkPrvNow)
+
 float tlH_now = float(na)
 float tlL_now = float(na)
+
+_tlH_from_prv := false
+_tlL_from_prv := false
 
 if _scH_cur >= i_minTouches and not na(_curH_now)
     if not na(_prvH_now) and _scH_prv > _scH_cur
         tlH_now := _prvH_now
         _tlH_score := _scH_prv
+        _tlH_from_prv := true
     else
         tlH_now := _curH_now
         _tlH_score := _scH_cur
 else if _scH_prv >= i_minTouches and not na(_prvH_now)
     tlH_now := _prvH_now
     _tlH_score := _scH_prv
+    _tlH_from_prv := true
 
 if _scL_cur >= i_minTouches and not na(_curL_now)
     if not na(_prvL_now) and _scL_prv > _scL_cur
         tlL_now := _prvL_now
         _tlL_score := _scL_prv
+        _tlL_from_prv := true
     else
         tlL_now := _curL_now
         _tlL_score := _scL_cur
 else if _scL_prv >= i_minTouches and not na(_prvL_now)
     tlL_now := _prvL_now
     _tlL_score := _scL_prv
+    _tlL_from_prv := true
+
+// =============================================================================
+// BREAK DETECTION - TL rota se convierte en linea BK (role reversal)
+// Break valido: cierre mas alla de la TL por i_bkMinATR*ATR durante i_bkConfirmBars barras consecutivas
+// Judas swing: break de 1-2 velas ignorado (contador no alcanza el umbral)
+// =============================================================================
+float _bkMinDist = i_bkMinATR * atrVal
+
+// Actualizar contadores de barras consecutivas mas alla de cada slot
+if not na(_curH_now) and close > _curH_now + _bkMinDist
+    _bkH_cnt_cur += 1
+else
+    _bkH_cnt_cur := 0
+if not na(_prvH_now) and close > _prvH_now + _bkMinDist
+    _bkH_cnt_prv += 1
+else
+    _bkH_cnt_prv := 0
+if not na(_curL_now) and close < _curL_now - _bkMinDist
+    _bkL_cnt_cur += 1
+else
+    _bkL_cnt_cur := 0
+if not na(_prvL_now) and close < _prvL_now - _bkMinDist
+    _bkL_cnt_prv += 1
+else
+    _bkL_cnt_prv := 0
+
+// Debug labels (solo cuando i_backtesting activo) - muestran estado de contadores BK
+if i_backtesting
+    string _dH = "H cntCur=" + str.tostring(_bkH_cnt_cur) +
+                 " cntPrv=" + str.tostring(_bkH_cnt_prv) +
+                 "\nscCur=" + str.tostring(_scH_cur) +
+                 " scPrv=" + str.tostring(_scH_prv) +
+                 "\nclsCur=" + (not na(_curH_now) ? str.tostring(close - _curH_now, format.mintick) : "na") +
+                 " clsPrv=" + (not na(_prvH_now) ? str.tostring(close - _prvH_now, format.mintick) : "na") +
+                 "\ndist=" + str.tostring(_bkMinDist, format.mintick) +
+                 "\nb2c=" + str.tostring(_b2H_cur) +
+                 " b2p=" + str.tostring(_b2H_prv) +
+                 " src=" + str.tostring(_bkH_src_b2)
+    if na(_dbgH)
+        _dbgH := label.new(bar_index, high + atrVal * 3, _dH,
+                           style=label.style_label_down, color=color.new(color.blue, 70),
+                           textcolor=color.white, size=size.normal)
+    else
+        label.set_x(_dbgH, bar_index)
+        label.set_y(_dbgH, high + atrVal * 3)
+        label.set_text(_dbgH, _dH)
+    string _dL = "L cntCur=" + str.tostring(_bkL_cnt_cur) +
+                 " cntPrv=" + str.tostring(_bkL_cnt_prv) +
+                 "\nscCur=" + str.tostring(_scL_cur) +
+                 " scPrv=" + str.tostring(_scL_prv) +
+                 "\nclsCur=" + (not na(_curL_now) ? str.tostring(close - _curL_now, format.mintick) : "na") +
+                 " clsPrv=" + (not na(_prvL_now) ? str.tostring(close - _prvL_now, format.mintick) : "na") +
+                 "\ndist=" + str.tostring(_bkMinDist, format.mintick) +
+                 "\nb2c=" + str.tostring(_b2L_cur) +
+                 " b2p=" + str.tostring(_b2L_prv) +
+                 " src=" + str.tostring(_bkL_src_b2)
+    if na(_dbgL)
+        _dbgL := label.new(bar_index, low - atrVal * 3, _dL,
+                           style=label.style_label_up, color=color.new(color.purple, 70),
+                           textcolor=color.white, size=size.normal)
+    else
+        label.set_x(_dbgL, bar_index)
+        label.set_y(_dbgL, low - atrVal * 3)
+        label.set_text(_dbgL, _dL)
+
+// Bloque de rotacion BK inlineado (restriccion v6: no puede modificar vars globales en funcion)
+// Break confirmado cuando el contador supera i_bkConfirmBars (>= para no depender del frame exacto)
+// Guard de duplicados: si la BK candidata proyecta cerca de la BK actual, es la misma tendencia
+float _candProj1B = f_proj(_b1H_cur, _v1H_cur, _b2H_cur, _v2H_cur)
+float _candProj2B = f_proj(_b1H_prv, _v1H_prv, _b2H_prv, _v2H_prv)
+float _candProj1A = f_proj(_b1L_cur, _v1L_cur, _b2L_cur, _v2L_cur)
+float _candProj2A = f_proj(_b1L_prv, _v1L_prv, _b2L_prv, _v2L_prv)
+float _curBKProj  = f_proj(_b1BK_cur, _v1BK_cur, _b2BK_cur, _v2BK_cur)
+float _bkDupDist  = i_bkDupATR * atrVal
+bool  _dup1B = i_bkDupATR > 0 and not na(_curBKProj) and not na(_candProj1B) and math.abs(_candProj1B - _curBKProj) < _bkDupDist
+bool  _dup2B = i_bkDupATR > 0 and not na(_curBKProj) and not na(_candProj2B) and math.abs(_candProj2B - _curBKProj) < _bkDupDist
+bool  _dup1A = i_bkDupATR > 0 and not na(_curBKProj) and not na(_candProj1A) and math.abs(_candProj1A - _curBKProj) < _bkDupDist
+bool  _dup2A = i_bkDupATR > 0 and not na(_curBKProj) and not na(_candProj2A) and math.abs(_candProj2A - _curBKProj) < _bkDupDist
+
+// Break de 1B (cur slot) - slot unico, BK vieja se elimina
+if _bkH_cnt_cur >= i_bkConfirmBars and (na(_bkH_src_b2) or _b2H_cur != _bkH_src_b2) and _scH_cur >= i_bkMinTouches and not _dup1B
+    _bkH_src_b2 := _b2H_cur
+    line.delete(_tlBK_cur)
+    label.delete(_lbl1BK)
+    _b1BK_cur := _b1H_cur,  _v1BK_cur := _v1H_cur
+    _b2BK_cur := _b2H_cur,  _v2BK_cur := _v2H_cur
+    _scBK_cur := _scH_cur,  _bkFromH_cur := true,  _bkSlope_cur := _v2H_cur < _v1H_cur
+    _tlBK_cur := line.new(_b1H_cur, _v1H_cur, _b2H_cur, _v2H_cur,
+                          color=color.new(i_colBK, f_tlAlpha(_scH_cur)),
+                          width=2, style=line.style_dashed, extend=extend.right)
+    _lbl1BK := label.new(bar_index + 3, _v2H_cur, "1BK",
+                         color=color.new(i_colBK, 70), textcolor=i_colBK,
+                         style=label.style_label_left, size=size.small)
+    // Label estatico en barra de confirmacion del break (1B rota al alza)
+    label.new(bar_index, high + atrVal * 0.3, "BK 1B",
+              style=label.style_label_down,
+              color=color.new(i_colBK, 30), textcolor=color.white, size=size.tiny)
+    _bk_judas_until := bar_index + i_bkJudasBars
+    line.delete(_tlH_cur)
+    label.delete(_lbl1B)
+    _tlH_cur := na
+    _lbl1B   := na
+    _scH_cur := 0
+    _bkH_cnt_cur := 0
+
+// Break de 2B (prv slot) cuando 1B sigue intacta - slot unico, BK vieja se elimina
+else if _bkH_cnt_prv >= i_bkConfirmBars and (na(_bkH_src_b2) or _b2H_prv != _bkH_src_b2) and _scH_prv >= i_bkMinTouches and not _dup2B
+    _bkH_src_b2 := _b2H_prv
+    line.delete(_tlBK_cur)
+    label.delete(_lbl1BK)
+    _b1BK_cur := _b1H_prv,  _v1BK_cur := _v1H_prv
+    _b2BK_cur := _b2H_prv,  _v2BK_cur := _v2H_prv
+    _scBK_cur := _scH_prv,  _bkFromH_cur := true,  _bkSlope_cur := _v2H_prv < _v1H_prv
+    _tlBK_cur := line.new(_b1H_prv, _v1H_prv, _b2H_prv, _v2H_prv,
+                          color=color.new(i_colBK, f_tlAlpha(_scH_prv)),
+                          width=2, style=line.style_dashed, extend=extend.right)
+    _lbl1BK := label.new(bar_index + 3, _v2H_prv, "1BK",
+                         color=color.new(i_colBK, 70), textcolor=i_colBK,
+                         style=label.style_label_left, size=size.small)
+    // Label estatico en barra de confirmacion del break (2B rota al alza)
+    label.new(bar_index, high + atrVal * 0.3, "BK 2B",
+              style=label.style_label_down,
+              color=color.new(i_colBK, 30), textcolor=color.white, size=size.tiny)
+    _bk_judas_until := bar_index + i_bkJudasBars
+    line.delete(_tlH_prv)
+    label.delete(_lbl2B)
+    _tlH_prv := na
+    _lbl2B   := na
+    _scH_prv := 0
+    _bkH_cnt_prv := 0
+
+// Break de 1A (cur slot) - slot unico, BK vieja se elimina
+if _bkL_cnt_cur >= i_bkConfirmBars and (na(_bkL_src_b2) or _b2L_cur != _bkL_src_b2) and _scL_cur >= i_bkMinTouches and not _dup1A
+    _bkL_src_b2 := _b2L_cur
+    line.delete(_tlBK_cur)
+    label.delete(_lbl1BK)
+    _b1BK_cur := _b1L_cur,  _v1BK_cur := _v1L_cur
+    _b2BK_cur := _b2L_cur,  _v2BK_cur := _v2L_cur
+    _scBK_cur := _scL_cur,  _bkFromH_cur := false,  _bkSlope_cur := _v2L_cur > _v1L_cur
+    _tlBK_cur := line.new(_b1L_cur, _v1L_cur, _b2L_cur, _v2L_cur,
+                          color=color.new(i_colBK, f_tlAlpha(_scL_cur)),
+                          width=2, style=line.style_dashed, extend=extend.right)
+    _lbl1BK := label.new(bar_index + 3, _v2L_cur, "1BK",
+                         color=color.new(i_colBK, 70), textcolor=i_colBK,
+                         style=label.style_label_left, size=size.small)
+    // Label estatico en barra de confirmacion del break (1A rota a la baja)
+    label.new(bar_index, low - atrVal * 0.3, "BK 1A",
+              style=label.style_label_up,
+              color=color.new(i_colBK, 30), textcolor=color.white, size=size.tiny)
+    _bk_judas_until := bar_index + i_bkJudasBars
+    line.delete(_tlL_cur)
+    label.delete(_lbl1A)
+    _tlL_cur := na
+    _lbl1A   := na
+    _scL_cur := 0
+    _bkL_cnt_cur := 0
+
+// Break de 2A (prv slot) cuando 1A sigue intacta - slot unico, BK vieja se elimina
+else if _bkL_cnt_prv >= i_bkConfirmBars and (na(_bkL_src_b2) or _b2L_prv != _bkL_src_b2) and _scL_prv >= i_bkMinTouches and not _dup2A
+    _bkL_src_b2 := _b2L_prv
+    line.delete(_tlBK_cur)
+    label.delete(_lbl1BK)
+    _b1BK_cur := _b1L_prv,  _v1BK_cur := _v1L_prv
+    _b2BK_cur := _b2L_prv,  _v2BK_cur := _v2L_prv
+    _scBK_cur := _scL_prv,  _bkFromH_cur := false,  _bkSlope_cur := _v2L_prv > _v1L_prv
+    _tlBK_cur := line.new(_b1L_prv, _v1L_prv, _b2L_prv, _v2L_prv,
+                          color=color.new(i_colBK, f_tlAlpha(_scL_prv)),
+                          width=2, style=line.style_dashed, extend=extend.right)
+    _lbl1BK := label.new(bar_index + 3, _v2L_prv, "1BK",
+                         color=color.new(i_colBK, 70), textcolor=i_colBK,
+                         style=label.style_label_left, size=size.small)
+    // Label estatico en barra de confirmacion del break (2A rota a la baja)
+    label.new(bar_index, low - atrVal * 0.3, "BK 2A",
+              style=label.style_label_up,
+              color=color.new(i_colBK, 30), textcolor=color.white, size=size.tiny)
+    _bk_judas_until := bar_index + i_bkJudasBars
+    line.delete(_tlL_prv)
+    label.delete(_lbl2A)
+    _tlL_prv := na
+    _lbl2A   := na
+    _scL_prv := 0
+    _bkL_cnt_prv := 0
+
+// =============================================================================
+// JUDAS FILTER - invalida BK si dentro de la ventana de vigilancia el precio
+// cierra de regreso al lado original de la TL rota. Restaura la TL al slot
+// original (fiel a la realidad: si fue Judas, ese nivel sigue siendo valido).
+// =============================================================================
+if not na(_bk_judas_until) and bar_index <= _bk_judas_until and not na(_tlBK_cur)
+    float _bkProj_now = f_proj(_b1BK_cur, _v1BK_cur, _b2BK_cur, _v2BK_cur)
+    float _judasDist  = i_bkJudasATR * atrVal
+    bool  _judasNow   = false
+    if _bkFromH_cur and not na(_bkProj_now) and close < _bkProj_now - _judasDist
+        _judasNow := true
+    if not _bkFromH_cur and not na(_bkProj_now) and close > _bkProj_now + _judasDist
+        _judasNow := true
+    if _judasNow
+        // Borrar BK (linea + label flotante 1BK)
+        line.delete(_tlBK_cur)
+        label.delete(_lbl1BK)
+        _tlBK_cur := na
+        _lbl1BK   := na
+        // Restaurar TL original al slot apropiado (cur si esta libre, sino prv)
+        if _bkFromH_cur
+            if na(_tlH_cur)
+                _b1H_cur := _b1BK_cur,  _v1H_cur := _v1BK_cur
+                _b2H_cur := _b2BK_cur,  _v2H_cur := _v2BK_cur
+                _scH_cur := _scBK_cur
+                _bkH_cnt_cur := 0
+                _tlH_cur := line.new(_b1H_cur, _v1H_cur, _b2H_cur, _v2H_cur,
+                                      color=color.new(i_colH, f_tlAlpha(_scH_cur)),
+                                      width=_scH_cur >= i_minTouches ? 2 : 1, extend=extend.right)
+                _lbl1B := label.new(bar_index + 3, _v2H_cur, "1B",
+                                     color=color.new(i_colH, 70), textcolor=i_colH,
+                                     style=label.style_label_left, size=size.small)
+            else
+                line.delete(_tlH_prv)
+                label.delete(_lbl2B)
+                _b1H_prv := _b1BK_cur,  _v1H_prv := _v1BK_cur
+                _b2H_prv := _b2BK_cur,  _v2H_prv := _v2BK_cur
+                _scH_prv := _scBK_cur
+                _bkH_cnt_prv := 0
+                _tlH_prv := line.new(_b1H_prv, _v1H_prv, _b2H_prv, _v2H_prv,
+                                      color=color.new(i_colH, 40),
+                                      width=1, extend=extend.right)
+                _lbl2B := label.new(bar_index + 3, _v2H_prv, "2B",
+                                     color=color.new(i_colH, 85), textcolor=i_colH,
+                                     style=label.style_label_left, size=size.small)
+            _bkH_src_b2 := int(na)
+            // Label JUDAS abajo (precio retorno por debajo de BK)
+            label.new(bar_index, low - atrVal * 0.3, "JUDAS",
+                      style=label.style_label_up,
+                      color=color.new(color.yellow, 20), textcolor=color.black, size=size.small)
+        else
+            if na(_tlL_cur)
+                _b1L_cur := _b1BK_cur,  _v1L_cur := _v1BK_cur
+                _b2L_cur := _b2BK_cur,  _v2L_cur := _v2BK_cur
+                _scL_cur := _scBK_cur
+                _bkL_cnt_cur := 0
+                _tlL_cur := line.new(_b1L_cur, _v1L_cur, _b2L_cur, _v2L_cur,
+                                      color=color.new(i_colL, f_tlAlpha(_scL_cur)),
+                                      width=_scL_cur >= i_minTouches ? 2 : 1, extend=extend.right)
+                _lbl1A := label.new(bar_index + 3, _v2L_cur, "1A",
+                                     color=color.new(i_colL, 70), textcolor=i_colL,
+                                     style=label.style_label_left, size=size.small)
+            else
+                line.delete(_tlL_prv)
+                label.delete(_lbl2A)
+                _b1L_prv := _b1BK_cur,  _v1L_prv := _v1BK_cur
+                _b2L_prv := _b2BK_cur,  _v2L_prv := _v2BK_cur
+                _scL_prv := _scBK_cur
+                _bkL_cnt_prv := 0
+                _tlL_prv := line.new(_b1L_prv, _v1L_prv, _b2L_prv, _v2L_prv,
+                                      color=color.new(i_colL, 40),
+                                      width=1, extend=extend.right)
+                _lbl2A := label.new(bar_index + 3, _v2L_prv, "2A",
+                                     color=color.new(i_colL, 85), textcolor=i_colL,
+                                     style=label.style_label_left, size=size.small)
+            _bkL_src_b2 := int(na)
+            // Label JUDAS arriba (precio retorno por encima de BK)
+            label.new(bar_index, high + atrVal * 0.3, "JUDAS",
+                      style=label.style_label_down,
+                      color=color.new(color.yellow, 20), textcolor=color.black, size=size.small)
+        // Limpiar estado BK
+        _b1BK_cur := int(na),    _v1BK_cur := float(na)
+        _b2BK_cur := int(na),    _v2BK_cur := float(na)
+        _scBK_cur := 0
+        _bk_judas_until := int(na)
 
 // =============================================================================
 // SENALES: wick de rechazo contra la trendline proyectada al bar actual
@@ -507,10 +915,35 @@ bool bullSig = (f_bullRej(tlL_now)
     and not _tradeOpen
     and _sesOK and _inTradeHours)
 
-plotshape(bearSig, "SHORT entrada", location=location.abovebar,
-          color=i_colH, style=shape.triangledown, size=size.small)
-plotshape(bullSig, "LONG entrada",  location=location.belowbar,
-          color=i_colL, style=shape.triangleup,   size=size.small)
+// Senales BK: retest de TL rota (role reversal)
+// Filtro de consolidacion: pendiente primero (opcion 2), spread ATR como fallback (opcion 1)
+float _baSpread = not na(tlH_now) and not na(tlL_now) ? math.abs(tlH_now - tlL_now) : float(na)
+_tlBK_score := not na(_bkCurNow) ? _scBK_cur : (not na(_bkPrvNow) ? _scBK_prv : 0)
+float tlBK_now = not na(_bkCurNow) ? _bkCurNow : (not na(_bkPrvNow) ? _bkPrvNow : float(na))
+bool  _bkIsH   = not na(_bkCurNow) ? _bkFromH_cur : _bkFromH_prv
+bool  _bkSlope = not na(_bkCurNow) ? _bkSlope_cur  : _bkSlope_prv
+bool  _bkFilter = _bkSlope or (not na(_baSpread) and _baSpread > i_minSpreadATR * atrVal)
+
+bool bkBullSig = (not na(tlBK_now) and _bkIsH
+    and f_bullRej(tlBK_now)
+    and _bkFilter
+    and not _tradeOpen
+    and _sesOK and _inTradeHours)
+
+bool bkBearSig = (not na(tlBK_now) and not _bkIsH
+    and f_bearRej(tlBK_now)
+    and _bkFilter
+    and not _tradeOpen
+    and _sesOK and _inTradeHours)
+
+plotshape(bearSig,   "SHORT entrada",    location=location.abovebar,
+          color=i_colH,  style=shape.triangledown, size=size.small)
+plotshape(bullSig,   "LONG entrada",     location=location.belowbar,
+          color=i_colL,  style=shape.triangleup,   size=size.small)
+plotshape(bkBearSig, "SHORT-BK entrada", location=location.abovebar,
+          color=i_colBK, style=shape.triangledown, size=size.tiny)
+plotshape(bkBullSig, "LONG-BK entrada",  location=location.belowbar,
+          color=i_colBK, style=shape.triangleup,   size=size.tiny)
 
 // =============================================================================
 // ENTRADAS + CAJAS R/R (siempre visibles, patron acc-scalping)
@@ -630,10 +1063,76 @@ if bullSig
     strategy.entry("LONG", strategy.long, qty=_qty)
     strategy.exit("LONG-X", "LONG", stop=_sl, limit=_tp2)
 
+if bkBearSig
+    float _sl     = high + atrVal * i_slBuf
+    float _e      = close
+    float _slDist = _sl - _e
+    float _qty    = i_riskUSD / _slDist
+    float _tp2    = _e - _slDist * 2
+    float _tp3    = _e - _slDist * 3
+    string _ses   = _inLD ? "LD" : (_inNY ? "NY" : "---")
+    trRisk   := box.new(bar_index, _sl, bar_index + 1, _e,
+                        border_color=i_colBK, bgcolor=color.new(i_colBK, 80))
+    trProfit := box.new(bar_index, _e,  bar_index + 1, _tp2,
+                        border_color=color.teal, bgcolor=color.new(color.teal, 80))
+    trActive   := true
+    _tradeOpen := true
+    trSL       := _sl
+    trTP       := _tp2
+    trLong     := false
+    line _slLineBK  = line.new(bar_index, _sl,  bar_index + 4,  _sl,
+                    color=color.new(color.red, 50), width=1)
+    line _tp2LineBK = line.new(bar_index, _tp2, bar_index + 25, _tp2,
+                    color=color.new(#26A69A, 40), width=2)
+    if i_backtesting
+        label.new(bar_index, _sl + atrVal * 0.3,
+                  "SHORT-BK  Ses: " + _ses +
+                  "\nE: "   + str.tostring(_e,  format.mintick) +
+                  "  SL: " + str.tostring(_sl, format.mintick),
+                  style=label.style_label_down,
+                  color=color.new(i_colBK, 10), textcolor=color.white, size=size.small)
+    strategy.entry("SHORT-BK", strategy.short, qty=_qty)
+    strategy.exit("SHORT-BK-X", "SHORT-BK", stop=_sl, limit=_tp2)
+
+if bkBullSig
+    float _sl     = low - atrVal * i_slBuf
+    float _e      = close
+    float _slDist = _e - _sl
+    float _qty    = i_riskUSD / _slDist
+    float _tp2    = _e + _slDist * 2
+    float _tp3    = _e + _slDist * 3
+    string _ses   = _inLD ? "LD" : (_inNY ? "NY" : "---")
+    trRisk   := box.new(bar_index, _e,   bar_index + 1, _sl,
+                        border_color=i_colBK, bgcolor=color.new(i_colBK, 80))
+    trProfit := box.new(bar_index, _tp2, bar_index + 1, _e,
+                        border_color=color.teal, bgcolor=color.new(color.teal, 80))
+    trActive   := true
+    _tradeOpen := true
+    trSL       := _sl
+    trTP       := _tp2
+    trLong     := true
+    line _slLineBKL  = line.new(bar_index, _sl,  bar_index + 4,  _sl,
+                     color=color.new(color.red, 50), width=1)
+    line _tp2LineBKL = line.new(bar_index, _tp2, bar_index + 25, _tp2,
+                     color=color.new(#26A69A, 40), width=2)
+    if i_backtesting
+        label.new(bar_index, _sl - atrVal * 0.3,
+                  "LONG-BK   Ses: " + _ses +
+                  "\nE: "   + str.tostring(_e,  format.mintick) +
+                  "  SL: " + str.tostring(_sl, format.mintick),
+                  style=label.style_label_up,
+                  color=color.new(i_colBK, 10), textcolor=color.white, size=size.small)
+    strategy.entry("LONG-BK", strategy.long, qty=_qty)
+    strategy.exit("LONG-BK-X", "LONG-BK", stop=_sl, limit=_tp2)
+
 // =============================================================================
 // ALERTAS
 // =============================================================================
-alertcondition(bearSig, "SHORT - Pivote en TL resistencia",
+alertcondition(bearSig,   "SHORT    - Pivote en TL resistencia",
                "Pivote alto confirmado sobre trendline de resistencia.")
-alertcondition(bullSig, "LONG  - Pivote en TL soporte",
+alertcondition(bullSig,   "LONG     - Pivote en TL soporte",
                "Pivote bajo confirmado sobre trendline de soporte.")
+alertcondition(bkBearSig, "SHORT-BK - Retest de B rota como resistencia",
+               "Precio retestea desde arriba una trendline bajista que fue rota al alza.")
+alertcondition(bkBullSig, "LONG-BK  - Retest de A rota como soporte",
+               "Precio retestea desde abajo una trendline alcista que fue rota a la baja.")
