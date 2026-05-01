@@ -22,7 +22,9 @@ strategy("TL Rejections - MTF", shorttitle="TLS", overlay=true,
 int   _curTfSec = timeframe.in_seconds(timeframe.period)
 
 // --- Deteccion de pivotes y best-fit de TL ---
-int   i_pivPer     = 10        // barras a cada lado para confirmar pivote estructural
+int   i_pivPer     = 10        // barras a cada lado para confirmar pivote estructural (MACRO, slot 1)
+int   i_pivPerMed  = 5         // pivot strength MEDIUM (slot 2 - tendencias de medio plazo)
+int   i_pivPerMicro = 3        // pivot strength MICRO (slot 3 - micro-tendencias recientes)
 // i_nPiv (cuantos pivotes evalua el best-fit) se define abajo dinamicamente igual al tamano del buffer
 // minTouches: 2 toques en cualquier TF (relajado para aumentar frecuencia de entradas)
 // Antes era 3 en TFs bajos lo cual era muy estricto en intraday
@@ -109,9 +111,6 @@ i_showTradeHrs = input.bool(true, "Lineas verticales en horario operativo", grou
 var GRP_RISK = "Gestion de Riesgo"
 i_riskUSD    = input.float(60.0, "Riesgo fijo por operacion (USD)", minval=1.0, step=5.0, group=GRP_RISK,
                tooltip="Cuanto estas dispuesto a perder en un trade que toca SL. La cantidad de unidades se calcula automaticamente para que la perdida = este valor.")
-i_backtesting = input.bool(false, "Mostrar etiquetas debug", group=GRP_RISK,
-               tooltip="Activa labels de debug para ver el estado interno del algoritmo en cada barra (contadores, scores, condiciones de senal). Solo para investigacion.")
-
 var GRP_ALGO = "Algoritmo (avanzado)"
 i_pivBuffer = input.int(10, "History TLA/TLB", minval=5, maxval=50, group=GRP_ALGO,
               tooltip="Cuantos pivotes recientes recuerda el algoritmo para construir TLA (soporte) y TLB (resistencia). Mas grande = mas historia disponible (mejor para detectar TLs antiguas relevantes), pero mayor costo computacional y posibles TLs muy antiguas que ya no aplican. Default 10 = buen balance.")
@@ -236,35 +235,29 @@ bool _inTradeHours = _localHour >= i_tradeStart and _localHour < i_tradeEnd
 float atrVal = ta.atr(14)
 float _tol   = atrVal * i_atrMult
 
-// Lineas verticales blancas segmentadas marcando inicio/fin de horario operativo.
-// FIX line accumulation: usa buffer circular de 10 lineas (5 dias x 2 lines/dia).
-// Asi no se acumulan indefinidamente y comen el limite max_lines_count=500.
-var line[] _hrLines = array.new<line>(0)
-int _hrMaxLines = 10
-
-if i_showTradeHrs
-    bool _hrStart = _inTradeHours and not _inTradeHours[1]
-    bool _hrEnd   = not _inTradeHours and _inTradeHours[1]
-    if _hrStart or _hrEnd
-        float _hrTop = ta.highest(high, 500) + atrVal * 5
-        float _hrBot = ta.lowest(low, 500) - atrVal * 5
-        line _newHrLine = line.new(bar_index, _hrBot, bar_index, _hrTop,
-                                    color=color.new(color.white, 30),
-                                    width=1, style=line.style_dashed)
-        array.push(_hrLines, _newHrLine)
-        // Si excedimos el buffer, borrar la mas vieja
-        if array.size(_hrLines) > _hrMaxLines
-            line _oldHrLine = array.shift(_hrLines)
-            line.delete(_oldHrLine)
+// Horario operativo: bgcolor() en lugar de lineas verticales.
+// Zero lineas creadas (no consume el budget max_lines_count=500), Pine lo
+// maneja como fill nativo. Visualmente mas claro que solo marcas de inicio/fin.
+bgcolor(i_showTradeHrs and _inTradeHours ? color.new(color.white, 92) : na, title="Horario operativo")
 
 float _pivSrcH = i_useBodyPivots ? math.max(open, close) : high
 float _pivSrcL = i_useBodyPivots ? math.min(open, close) : low
+
+// MACRO pivots (slot 1) - strength alta, tendencias estructurales
 float pivH_raw = ta.pivothigh(_pivSrcH, i_pivPer, i_pivPer)
 float pivL_raw = ta.pivotlow(_pivSrcL,  i_pivPer, i_pivPer)
 
-// Filtro de prominencia: el pivote debe sobresalir significativamente vs sus 20 vecinos.
-// Un techo en consolidacion acumula poca prominencia y se descarta.
-// Un techo de un rally fuerte acumula mucha prominencia y pasa.
+// MEDIUM pivots (slot 2) - tendencias de medio plazo
+float pivH_rawMed = ta.pivothigh(_pivSrcH, i_pivPerMed, i_pivPerMed)
+float pivL_rawMed = ta.pivotlow(_pivSrcL,  i_pivPerMed, i_pivPerMed)
+
+// MICRO pivots (slot 3) - tendencias recientes de corto plazo
+float pivH_rawMicro = ta.pivothigh(_pivSrcH, i_pivPerMicro, i_pivPerMicro)
+float pivL_rawMicro = ta.pivotlow(_pivSrcL,  i_pivPerMicro, i_pivPerMicro)
+
+// Filtro de prominencia: el pivote debe sobresalir significativamente vs sus vecinos.
+// Solo aplicado a MACRO (slot 1) - los slots medium/micro son intencionalmente mas sensibles
+// para capturar micro-tendencias dentro del rango macro.
 float _promThresh = i_minPromATR * atrVal
 float _promH = 0.0
 if not na(pivH_raw)
@@ -276,18 +269,26 @@ if not na(pivL_raw)
     for k = 1 to i_pivPer
         _promL := _promL + (_pivSrcL[i_pivPer + k] - pivL_raw)
         _promL := _promL + (_pivSrcL[i_pivPer - k] - pivL_raw)
-float pivH = not na(pivH_raw) and _promH >= _promThresh ? pivH_raw : na
-float pivL = not na(pivL_raw) and _promL >= _promThresh ? pivL_raw : na
+float pivH      = not na(pivH_raw)      and _promH >= _promThresh ? pivH_raw      : na
+float pivL      = not na(pivL_raw)      and _promL >= _promThresh ? pivL_raw      : na
+float pivHMed   = pivH_rawMed       // sin filtro de prominencia (mas sensible)
+float pivLMed   = pivL_rawMed
+float pivHMicro = pivH_rawMicro     // sin filtro (maximo zoom)
+float pivLMicro = pivL_rawMicro
 
-// Debug visual: marcar pivotes que pasaron el filtro de prominencia (solo i_backtesting=true)
-plot(i_backtesting and not na(pivH) ? pivH : na, title="Pivot High", style=plot.style_circles, color=color.aqua, linewidth=3, offset=-i_pivPer)
-plot(i_backtesting and not na(pivL) ? pivL : na, title="Pivot Low",  style=plot.style_circles, color=color.fuchsia, linewidth=3, offset=-i_pivPer)
-
-// Buffer de pivotes recientes. Tamano definido por input i_pivBuffer.
-var int[]   _pH_b = array.new_int(i_pivBuffer,   int(na))
-var float[] _pH_v = array.new_float(i_pivBuffer, float(na))
-var int[]   _pL_b = array.new_int(i_pivBuffer,   int(na))
-var float[] _pL_v = array.new_float(i_pivBuffer, float(na))
+// Buffers de pivotes por nivel. Tamano definido por input i_pivBuffer.
+var int[]   _pH_b      = array.new_int(i_pivBuffer,   int(na))
+var float[] _pH_v      = array.new_float(i_pivBuffer, float(na))
+var int[]   _pL_b      = array.new_int(i_pivBuffer,   int(na))
+var float[] _pL_v      = array.new_float(i_pivBuffer, float(na))
+var int[]   _pH_bMed   = array.new_int(i_pivBuffer,   int(na))
+var float[] _pH_vMed   = array.new_float(i_pivBuffer, float(na))
+var int[]   _pL_bMed   = array.new_int(i_pivBuffer,   int(na))
+var float[] _pL_vMed   = array.new_float(i_pivBuffer, float(na))
+var int[]   _pH_bMicro = array.new_int(i_pivBuffer,   int(na))
+var float[] _pH_vMicro = array.new_float(i_pivBuffer, float(na))
+var int[]   _pL_bMicro = array.new_int(i_pivBuffer,   int(na))
+var float[] _pL_vMicro = array.new_float(i_pivBuffer, float(na))
 
 // Etiquetas de slot para debug visual: muestran el numero de slot que ocupa
 // cada pivote en el buffer. Si un pivote no tiene etiqueta, esta fuera del array.
@@ -321,10 +322,6 @@ var int   _tlL_score = 0
 var label _lbl3B = na,   var label _lbl3A = na
 var label _lbl2B = na,   var label _lbl2A = na
 var label _lbl1B = na,   var label _lbl1A = na
-var label _dbgH  = na,   var label _dbgL  = na
-var label _dbgLine = na   // debug estado de lineas (1 sola, se actualiza cada barra)
-var table _dbgTable = na  // debug tabla de estado de TODAS las lineas (esquina del chart)
-var label _dbgBK = na
 var label _lblH1B = na,  var label _lblH1A = na
 var label _lblH4B = na,  var label _lblH4A = na
 var label _lbl3BK = na,  var label _lbl2BK = na
@@ -499,66 +496,25 @@ var line  _htf1H_line = na
 var line  _htf1L_line = na
 var line  _htf2H_line = na
 var line  _htf2L_line = na
-var float _prev_h1rP2 = float(na)
-var float _prev_h1sP2 = float(na)
-var float _prev_h2rP2 = float(na)
-var float _prev_h2sP2 = float(na)
 
-// Detectar purge silencioso de Pine para HTF lines via line.get_x1 (na si purgada)
-int  _htf1H_x1Safe = na(_htf1H_line) ? int(na) : line.get_x1(_htf1H_line)
-bool _htf1H_purged = not na(_htf1H_line) and na(_htf1H_x1Safe)
-int  _htf1L_x1Safe = na(_htf1L_line) ? int(na) : line.get_x1(_htf1L_line)
-bool _htf1L_purged = not na(_htf1L_line) and na(_htf1L_x1Safe)
-int  _htf2H_x1Safe = na(_htf2H_line) ? int(na) : line.get_x1(_htf2H_line)
-bool _htf2H_purged = not na(_htf2H_line) and na(_htf2H_x1Safe)
-int  _htf2L_x1Safe = na(_htf2L_line) ? int(na) : line.get_x1(_htf2L_line)
-bool _htf2L_purged = not na(_htf2L_line) and na(_htf2L_x1Safe)
-
-// Fix Pine quirk: na(_h1rP2) handle - en primera ejecucion _prev=na hace que != na devuelva na (no true)
-// Recrear linea si: pivot cambio O linea fue purgada por max_lines_count
-if not na(_h1rP2) and not na(_h1rP1) and (na(_prev_h1rP2) or _h1rP2 != _prev_h1rP2 or _htf1H_purged)
-    line.delete(_htf1H_line)
-    _htf1H_line := line.new(_h1rT1, _h1rP1, _h1rT2, _h1rP2,
-                            xloc=xloc.bar_time, extend=extend.right,
-                            color=i_colHTF1H, width=3, style=line.style_dashed)
-    label.delete(_lblH1B)
+// HTF labels: solo creacion una vez. La actualizacion de xy se hace en sync block (mas abajo).
+// Las HTF lineas se crean en el FORCE RECREATE cada bar (sistema anclado en bar_index).
+if not na(_h1rP2) and na(_lblH1B)
     _lblH1B := label.new(bar_index + 3, _h1rP2, "H1B",
                          color=color.new(i_colHTF1H, 50), textcolor=color.white,
                          style=label.style_label_left, size=size.normal)
-    _prev_h1rP2 := _h1rP2
-
-if not na(_h1sP2) and not na(_h1sP1) and (na(_prev_h1sP2) or _h1sP2 != _prev_h1sP2 or _htf1L_purged)
-    line.delete(_htf1L_line)
-    _htf1L_line := line.new(_h1sT1, _h1sP1, _h1sT2, _h1sP2,
-                            xloc=xloc.bar_time, extend=extend.right,
-                            color=i_colHTF1L, width=3, style=line.style_dashed)
-    label.delete(_lblH1A)
+if not na(_h1sP2) and na(_lblH1A)
     _lblH1A := label.new(bar_index + 3, _h1sP2, "H1A",
                          color=color.new(i_colHTF1L, 50), textcolor=color.white,
                          style=label.style_label_left, size=size.normal)
-    _prev_h1sP2 := _h1sP2
-
-if not na(_h2rP2) and not na(_h2rP1) and (na(_prev_h2rP2) or _h2rP2 != _prev_h2rP2 or _htf2H_purged)
-    line.delete(_htf2H_line)
-    _htf2H_line := line.new(_h2rT1, _h2rP1, _h2rT2, _h2rP2,
-                            xloc=xloc.bar_time, extend=extend.right,
-                            color=i_colHTF2H, width=4, style=line.style_solid)
-    label.delete(_lblH4B)
+if not na(_h2rP2) and na(_lblH4B)
     _lblH4B := label.new(bar_index + 3, _h2rP2, "H4B",
                          color=color.new(i_colHTF2H, 50), textcolor=color.white,
                          style=label.style_label_left, size=size.normal)
-    _prev_h2rP2 := _h2rP2
-
-if not na(_h2sP2) and not na(_h2sP1) and (na(_prev_h2sP2) or _h2sP2 != _prev_h2sP2 or _htf2L_purged)
-    line.delete(_htf2L_line)
-    _htf2L_line := line.new(_h2sT1, _h2sP1, _h2sT2, _h2sP2,
-                            xloc=xloc.bar_time, extend=extend.right,
-                            color=i_colHTF2L, width=4, style=line.style_solid)
-    label.delete(_lblH4A)
+if not na(_h2sP2) and na(_lblH4A)
     _lblH4A := label.new(bar_index + 3, _h2sP2, "H4A",
                          color=color.new(i_colHTF2L, 50), textcolor=color.white,
                          style=label.style_label_left, size=size.normal)
-    _prev_h2sP2 := _h2sP2
 
 f_scoreBear(float lvl) =>
     float aTol     = atrVal * i_htfTol
@@ -630,210 +586,115 @@ f_prob(int s) =>
         col := color.new(color.red, 20)
     [txt, col]
 
+// Multi-tier H detection (sin cascada cronologica, cada nivel independiente):
+// 1B = MACRO (pivPer=10), 2B = MEDIUM (pivPer=5), 3B = MICRO (pivPer=3)
+float _maxSlopeAbsH = i_maxSlopeATR > 0 ? i_maxSlopeATR * atrVal : 0.0
+float _decayH       = i_useRecencyBias ? i_recencyDecay : 1.0
+
+// Slot 1B - MACRO
 if not na(pivH)
-    // Manejar label del pivote mas antiguo (que se va a sacar del buffer)
     label _oldH_lbl = array.get(_pH_lbls, 0)
     if not na(_oldH_lbl)
         label.delete(_oldH_lbl)
     f_push(_pH_b, _pH_v, bar_index - i_pivPer, pivH)
     array.shift(_pH_lbls)
-    label _newH_lbl = i_backtesting ? label.new(bar_index - i_pivPer, pivH,
-                                                 text=str.tostring(i_pivBuffer),
-                                                 style=label.style_label_down,
-                                                 color=color.new(color.aqua, 50),
-                                                 textcolor=color.white,
-                                                 size=size.tiny) : na
-    array.push(_pH_lbls, _newH_lbl)
-    // Actualizar texto de cada label para reflejar su nuevo slot
-    if i_backtesting
-        for _i = 0 to i_pivBuffer - 1
-            label _lblH = array.get(_pH_lbls, _i)
-            if not na(_lblH)
-                label.set_text(_lblH, str.tostring(_i + 1))
-    float _maxSlopeAbsH = i_maxSlopeATR > 0 ? i_maxSlopeATR * atrVal : 0.0
-    float _decayH       = i_useRecencyBias ? i_recencyDecay : 1.0
+    array.push(_pH_lbls, na)
     [b1, v1, b2, v2, sc] = f_bestFit(_pH_b, _pH_v, _tol, i_nPiv, i_minSpacing, true, _maxSlopeAbsH, _decayH, i_forceExtremeAnchor)
     if not na(b1)
-        bool _newH = na(_b2H_cur) or b2 != _b2H_cur or b1 != _b1H_cur
-        // Guard contra duplicacion de tendencia: si la nueva proyecta dentro
-        // de N x ATR de la actual, es la misma tendencia y solo se actualiza in-place
-        float _curHnowProj = f_proj(_b1H_cur, _v1H_cur, _b2H_cur, _v2H_cur)
-        float _newHnowProj = f_proj(b1, v1, b2, v2)
-        bool  _sameTendH = i_bkDupATR > 0 and not na(_curHnowProj) and not na(_newHnowProj) and math.abs(_newHnowProj - _curHnowProj) < i_bkDupATR * atrVal
-        if _newH and not _sameTendH
-            // CASCADA 3 slots: old DELETE, prv->old, cur->prv, new->cur
-            // Step 1: borrar el mas antiguo (slot _old, label "3B")
-            line.delete(_tlH_old)
-            label.delete(_lbl3B)
-            _lbl3B := na
-            // Step 2: prv -> old (con su label "2B" -> "3B")
-            _b1H_old := _b1H_prv,  _v1H_old := _v1H_prv
-            _b2H_old := _b2H_prv,  _v2H_old := _v2H_prv
-            _scH_old  := _scH_prv
-            _tlH_old  := _tlH_prv
-            _lbl3B    := _lbl2B
-            _lbl2B    := na
-            if not na(_tlH_old)
-                line.set_color(_tlH_old, color.new(i_colH, 70))
-                line.set_width(_tlH_old, 1)
-                if not na(_lbl3B)
-                    label.set_text(_lbl3B, "3B")
-            // Step 3: cur -> prv (con su label "1B" -> "2B")
-            _b1H_prv := _b1H_cur,  _v1H_prv := _v1H_cur
-            _b2H_prv := _b2H_cur,  _v2H_prv := _v2H_cur
-            _scH_prv  := _scH_cur
-            _tlH_prv  := _tlH_cur
-            _lbl2B    := _lbl1B
-            _lbl1B    := na
-            if not na(_tlH_prv)
-                line.set_color(_tlH_prv, color.new(i_colH, 40))
-                line.set_width(_tlH_prv, 1)
-                if not na(_lbl2B)
-                    label.set_text(_lbl2B, "2B")
-            // Step 4: nueva TL -> cur (label "1B")
-            _tlH_cur  := line.new(b1, v1, b2, v2,
-                                  color=color.new(i_colH, f_tlAlpha(sc)),
-                                  width=sc >= i_minTouches ? 2 : 1, extend=extend.right)
+        _b1H_cur := b1
+        _v1H_cur := v1
+        _b2H_cur := b2
+        _v2H_cur := v2
+        _scH_cur := sc
+        if na(_lbl1B)
             _lbl1B := label.new(bar_index + 3, v2, "1B",
                                 color=color.new(i_colH, 70), textcolor=i_colH,
                                 style=label.style_label_left, size=size.small)
-            _b1H_cur := b1,  _v1H_cur := v1
-            _b2H_cur := b2,  _v2H_cur := v2
-            _scH_cur  := sc
-            _bkH_cnt_prv := _bkH_cnt_cur
-        else if _newH and _sameTendH
-            // Misma tendencia: actualizar cur in-place sin rotar
-            line.set_xy1(_tlH_cur, b1, v1)
-            line.set_xy2(_tlH_cur, b2, v2)
-            line.set_color(_tlH_cur, color.new(i_colH, f_tlAlpha(sc)))
-            line.set_width(_tlH_cur, sc >= i_minTouches ? 2 : 1)
-            _b1H_cur := b1,  _v1H_cur := v1
-            _b2H_cur := b2,  _v2H_cur := v2
-            _scH_cur := sc
-        else
-            _scH_cur := sc
-            // Safety: si la linea fue eliminada por evento previo, recrearla
-            if na(_tlH_cur)
-                _tlH_cur := line.new(b1, v1, b2, v2,
-                                      color=color.new(i_colH, f_tlAlpha(sc)),
-                                      width=sc >= i_minTouches ? 2 : 1, extend=extend.right)
-                if na(_lbl1B)
-                    _lbl1B := label.new(bar_index + 3, v2, "1B",
-                                         color=color.new(i_colH, 70), textcolor=i_colH,
-                                         style=label.style_label_left, size=size.small)
-            else
-                line.set_color(_tlH_cur, color.new(i_colH, f_tlAlpha(sc)))
-                line.set_width(_tlH_cur, sc >= i_minTouches ? 2 : 1)
-            if not na(_tlH_prv)
-                int _aP = math.min(100, 40 + _scH_cur * 20)
-                if _aP >= 98
-                    line.delete(_tlH_prv)
-                    _tlH_prv := na,      _scH_prv := 0
-                    _b1H_prv := int(na), _v1H_prv := float(na)
-                    _b2H_prv := int(na), _v2H_prv := float(na)
-                    label.delete(_lbl2B)
-                    _lbl2B := na
-                else
-                    line.set_color(_tlH_prv, color.new(i_colH, _aP))
 
+// Slot 2B - MEDIUM
+if not na(pivHMed)
+    f_push(_pH_bMed, _pH_vMed, bar_index - i_pivPerMed, pivHMed)
+    [b1, v1, b2, v2, sc] = f_bestFit(_pH_bMed, _pH_vMed, _tol, i_nPiv, i_minSpacing, true, _maxSlopeAbsH, _decayH, i_forceExtremeAnchor)
+    if not na(b1)
+        _b1H_prv := b1
+        _v1H_prv := v1
+        _b2H_prv := b2
+        _v2H_prv := v2
+        _scH_prv := sc
+        if na(_lbl2B)
+            _lbl2B := label.new(bar_index + 3, v2, "2B",
+                                color=color.new(i_colH, 85), textcolor=i_colH,
+                                style=label.style_label_left, size=size.small)
+
+// Slot 3B - MICRO
+if not na(pivHMicro)
+    f_push(_pH_bMicro, _pH_vMicro, bar_index - i_pivPerMicro, pivHMicro)
+    [b1, v1, b2, v2, sc] = f_bestFit(_pH_bMicro, _pH_vMicro, _tol, i_nPiv, i_minSpacing, true, _maxSlopeAbsH, _decayH, i_forceExtremeAnchor)
+    if not na(b1)
+        _b1H_old := b1
+        _v1H_old := v1
+        _b2H_old := b2
+        _v2H_old := v2
+        _scH_old := sc
+        if na(_lbl3B)
+            _lbl3B := label.new(bar_index + 3, v2, "3B",
+                                color=color.new(i_colH, 90), textcolor=i_colH,
+                                style=label.style_label_left, size=size.small)
+
+// Multi-tier L detection (sin cascada cronologica, cada nivel independiente):
+// 1A = MACRO (pivPer=10), 2A = MEDIUM (pivPer=5), 3A = MICRO (pivPer=3)
+float _maxSlopeAbsL = i_maxSlopeATR > 0 ? i_maxSlopeATR * atrVal : 0.0
+float _decayL       = i_useRecencyBias ? i_recencyDecay : 1.0
+
+// Slot 1A - MACRO
 if not na(pivL)
     label _oldL_lbl = array.get(_pL_lbls, 0)
     if not na(_oldL_lbl)
         label.delete(_oldL_lbl)
     f_push(_pL_b, _pL_v, bar_index - i_pivPer, pivL)
     array.shift(_pL_lbls)
-    label _newL_lbl = i_backtesting ? label.new(bar_index - i_pivPer, pivL,
-                                                 text=str.tostring(i_pivBuffer),
-                                                 style=label.style_label_up,
-                                                 color=color.new(color.fuchsia, 50),
-                                                 textcolor=color.white,
-                                                 size=size.tiny) : na
-    array.push(_pL_lbls, _newL_lbl)
-    if i_backtesting
-        for _i = 0 to i_pivBuffer - 1
-            label _lblL = array.get(_pL_lbls, _i)
-            if not na(_lblL)
-                label.set_text(_lblL, str.tostring(_i + 1))
-    float _maxSlopeAbsL = i_maxSlopeATR > 0 ? i_maxSlopeATR * atrVal : 0.0
-    float _decayL       = i_useRecencyBias ? i_recencyDecay : 1.0
+    array.push(_pL_lbls, na)
     [b1, v1, b2, v2, sc] = f_bestFit(_pL_b, _pL_v, _tol, i_nPiv, i_minSpacing, false, _maxSlopeAbsL, _decayL, i_forceExtremeAnchor)
     if not na(b1)
-        bool _newL = na(_b2L_cur) or b2 != _b2L_cur or b1 != _b1L_cur
-        // Guard contra duplicacion de tendencia para A
-        float _curLnowProj = f_proj(_b1L_cur, _v1L_cur, _b2L_cur, _v2L_cur)
-        float _newLnowProj = f_proj(b1, v1, b2, v2)
-        bool  _sameTendL = i_bkDupATR > 0 and not na(_curLnowProj) and not na(_newLnowProj) and math.abs(_newLnowProj - _curLnowProj) < i_bkDupATR * atrVal
-        if _newL and not _sameTendL
-            // CASCADA 3 slots: old DELETE, prv->old, cur->prv, new->cur
-            line.delete(_tlL_old)
-            label.delete(_lbl3A)
-            _lbl3A := na
-            _b1L_old := _b1L_prv,  _v1L_old := _v1L_prv
-            _b2L_old := _b2L_prv,  _v2L_old := _v2L_prv
-            _scL_old  := _scL_prv
-            _tlL_old  := _tlL_prv
-            _lbl3A    := _lbl2A
-            _lbl2A    := na
-            if not na(_tlL_old)
-                line.set_color(_tlL_old, color.new(i_colL, 70))
-                line.set_width(_tlL_old, 1)
-                if not na(_lbl3A)
-                    label.set_text(_lbl3A, "3A")
-            _b1L_prv := _b1L_cur,  _v1L_prv := _v1L_cur
-            _b2L_prv := _b2L_cur,  _v2L_prv := _v2L_cur
-            _scL_prv  := _scL_cur
-            _tlL_prv  := _tlL_cur
-            _lbl2A    := _lbl1A
-            _lbl1A    := na
-            if not na(_tlL_prv)
-                line.set_color(_tlL_prv, color.new(i_colL, 40))
-                line.set_width(_tlL_prv, 1)
-                if not na(_lbl2A)
-                    label.set_text(_lbl2A, "2A")
-            _tlL_cur  := line.new(b1, v1, b2, v2,
-                                  color=color.new(i_colL, f_tlAlpha(sc)),
-                                  width=sc >= i_minTouches ? 2 : 1, extend=extend.right)
+        _b1L_cur := b1
+        _v1L_cur := v1
+        _b2L_cur := b2
+        _v2L_cur := v2
+        _scL_cur := sc
+        if na(_lbl1A)
             _lbl1A := label.new(bar_index + 3, v2, "1A",
                                 color=color.new(i_colL, 70), textcolor=i_colL,
                                 style=label.style_label_left, size=size.small)
-            _b1L_cur := b1,  _v1L_cur := v1
-            _b2L_cur := b2,  _v2L_cur := v2
-            _scL_cur  := sc
-            _bkL_cnt_prv := _bkL_cnt_cur
-        else if _newL and _sameTendL
-            // Misma tendencia: actualizar cur in-place sin demote a prv
-            line.set_xy1(_tlL_cur, b1, v1)
-            line.set_xy2(_tlL_cur, b2, v2)
-            line.set_color(_tlL_cur, color.new(i_colL, f_tlAlpha(sc)))
-            line.set_width(_tlL_cur, sc >= i_minTouches ? 2 : 1)
-            _b1L_cur := b1,  _v1L_cur := v1
-            _b2L_cur := b2,  _v2L_cur := v2
-            _scL_cur := sc
-        else
-            _scL_cur := sc
-            // Safety: si la linea fue eliminada por evento previo, recrearla
-            if na(_tlL_cur)
-                _tlL_cur := line.new(b1, v1, b2, v2,
-                                      color=color.new(i_colL, f_tlAlpha(sc)),
-                                      width=sc >= i_minTouches ? 2 : 1, extend=extend.right)
-                if na(_lbl1A)
-                    _lbl1A := label.new(bar_index + 3, v2, "1A",
-                                         color=color.new(i_colL, 70), textcolor=i_colL,
-                                         style=label.style_label_left, size=size.small)
-            else
-                line.set_color(_tlL_cur, color.new(i_colL, f_tlAlpha(sc)))
-                line.set_width(_tlL_cur, sc >= i_minTouches ? 2 : 1)
-            if not na(_tlL_prv)
-                int _aP = math.min(100, 40 + _scL_cur * 20)
-                if _aP >= 98
-                    line.delete(_tlL_prv)
-                    _tlL_prv := na,      _scL_prv := 0
-                    _b1L_prv := int(na), _v1L_prv := float(na)
-                    _b2L_prv := int(na), _v2L_prv := float(na)
-                    label.delete(_lbl2A)
-                    _lbl2A := na
-                else
-                    line.set_color(_tlL_prv, color.new(i_colL, _aP))
+
+// Slot 2A - MEDIUM
+if not na(pivLMed)
+    f_push(_pL_bMed, _pL_vMed, bar_index - i_pivPerMed, pivLMed)
+    [b1, v1, b2, v2, sc] = f_bestFit(_pL_bMed, _pL_vMed, _tol, i_nPiv, i_minSpacing, false, _maxSlopeAbsL, _decayL, i_forceExtremeAnchor)
+    if not na(b1)
+        _b1L_prv := b1
+        _v1L_prv := v1
+        _b2L_prv := b2
+        _v2L_prv := v2
+        _scL_prv := sc
+        if na(_lbl2A)
+            _lbl2A := label.new(bar_index + 3, v2, "2A",
+                                color=color.new(i_colL, 85), textcolor=i_colL,
+                                style=label.style_label_left, size=size.small)
+
+// Slot 3A - MICRO
+if not na(pivLMicro)
+    f_push(_pL_bMicro, _pL_vMicro, bar_index - i_pivPerMicro, pivLMicro)
+    [b1, v1, b2, v2, sc] = f_bestFit(_pL_bMicro, _pL_vMicro, _tol, i_nPiv, i_minSpacing, false, _maxSlopeAbsL, _decayL, i_forceExtremeAnchor)
+    if not na(b1)
+        _b1L_old := b1
+        _v1L_old := v1
+        _b2L_old := b2
+        _v2L_old := v2
+        _scL_old := sc
+        if na(_lbl3A)
+            _lbl3A := label.new(bar_index + 3, v2, "3A",
+                                color=color.new(i_colL, 90), textcolor=i_colL,
+                                style=label.style_label_left, size=size.small)
 
 // Seleccionar la TL mas fuerte disponible (cur o prv) para senales de entrada
 _tlH_score := 0
@@ -852,7 +713,7 @@ bool _tlL_curPurged   = not na(_tlL_cur) and na(_tlL_curX1Safe)
 if _scH_cur >= 1 and not na(_curH_now) and (na(_tlH_cur) or _tlH_curPurged) and not na(_b1H_cur) and not na(_b2H_cur)
     _tlH_cur := line.new(_b1H_cur, _v1H_cur, _b2H_cur, _v2H_cur,
                           color=color.new(i_colH, f_tlAlpha(_scH_cur)),
-                          width=_scH_cur >= i_minTouches ? 2 : 1, extend=extend.right)
+                          width=_scH_cur >= i_minTouches ? 2 : 1, extend=extend.both)
     if na(_lbl1B)
         _lbl1B := label.new(bar_index + 3, _v2H_cur, "1B",
                              color=color.new(i_colH, 70), textcolor=i_colH,
@@ -860,7 +721,7 @@ if _scH_cur >= 1 and not na(_curH_now) and (na(_tlH_cur) or _tlH_curPurged) and 
 if _scL_cur >= 1 and not na(_curL_now) and (na(_tlL_cur) or _tlL_curPurged) and not na(_b1L_cur) and not na(_b2L_cur)
     _tlL_cur := line.new(_b1L_cur, _v1L_cur, _b2L_cur, _v2L_cur,
                           color=color.new(i_colL, f_tlAlpha(_scL_cur)),
-                          width=_scL_cur >= i_minTouches ? 2 : 1, extend=extend.right)
+                          width=_scL_cur >= i_minTouches ? 2 : 1, extend=extend.both)
     if na(_lbl1A)
         _lbl1A := label.new(bar_index + 3, _v2L_cur, "1A",
                              color=color.new(i_colL, 70), textcolor=i_colL,
@@ -873,104 +734,176 @@ bool _bkLinePurged = not na(_tlBK_cur) and na(_bkX1Test)
 if _scBK_cur >= 1 and not na(_b1BK_cur) and not na(_b2BK_cur) and (na(_tlBK_cur) or _bkLinePurged)
     _tlBK_cur := line.new(_b1BK_cur, _v1BK_cur, _b2BK_cur, _v2BK_cur,
                           color=color.new(i_colBK, f_tlAlpha(_scBK_cur)),
-                          width=2, style=line.style_dashed, extend=extend.right)
+                          width=2, style=line.style_dashed, extend=extend.both)
     if na(_lbl3BK)
         _lbl3BK := label.new(bar_index + 3, _v2BK_cur, "1BK",
                              color=color.new(i_colBK, 70), textcolor=i_colBK,
                              style=label.style_label_left, size=size.small)
 
-// Cleanup AGRESIVO: si dos slots tienen MISMA DIRECCION (slope similar) o COMPARTEN
-// NIVEL (proyeccion cercana), son redundantes. Solo se preservan slots que representan
-// DIRECCIONES O NIVELES distintos. Esto es lo que da valor a tener 3 slots: cada uno
-// representa una tendencia genuinamente diferente del historico.
-// Pares evaluados: 1B vs 2B, 1B vs 3B, 2B vs 3B (la mas antigua se elimina).
-float _curSlopeH_cln = not na(_b1H_cur) and not na(_b2H_cur) and _b2H_cur > _b1H_cur ? (_v2H_cur - _v1H_cur) / float(_b2H_cur - _b1H_cur) : float(na)
-float _prvSlopeH_cln = not na(_b1H_prv) and not na(_b2H_prv) and _b2H_prv > _b1H_prv ? (_v2H_prv - _v1H_prv) / float(_b2H_prv - _b1H_prv) : float(na)
-float _oldSlopeH_cln = not na(_b1H_old) and not na(_b2H_old) and _b2H_old > _b1H_old ? (_v2H_old - _v1H_old) / float(_b2H_old - _b1H_old) : float(na)
-// (Removidas _curHprojCln/_prvHprojCln/_oldHprojCln: cleanup ya no usa nivel)
-// CLEANUP RELAJADO: solo borra si las dos lineas tienen MISMA PENDIENTE.
-// Si comparten nivel pero diferente pendiente = lineas distintas, mantener ambas.
-// Esto preserva mas lineas vivas para que mejora #1 (3-slot picker) tenga opciones.
-float _slopeTolH   = atrVal * 0.02  // mas estricto que antes (0.05) = elimina menos
-
-// 1B vs 2B: solo borra si MISMA PENDIENTE (no por nivel)
-if not na(_tlH_prv) and not na(_curSlopeH_cln) and not na(_prvSlopeH_cln)
-    bool _sameSlopeH12 = math.abs(_curSlopeH_cln - _prvSlopeH_cln) < _slopeTolH
-    if _sameSlopeH12
-        line.delete(_tlH_prv)
-        label.delete(_lbl2B)
-        _tlH_prv := na
-        _b1H_prv := int(na),  _v1H_prv := float(na)
-        _b2H_prv := int(na),  _v2H_prv := float(na)
-        _scH_prv  := 0
-        _bkH_cnt_prv := 0
-        _lbl2B := na
-
-// 1B vs 3B: solo borra si MISMA PENDIENTE
-if not na(_tlH_old) and not na(_curSlopeH_cln) and not na(_oldSlopeH_cln)
-    bool _sameSlopeH13 = math.abs(_curSlopeH_cln - _oldSlopeH_cln) < _slopeTolH
-    if _sameSlopeH13
-        line.delete(_tlH_old)
-        label.delete(_lbl3B)
-        _tlH_old := na
-        _b1H_old := int(na),  _v1H_old := float(na)
-        _b2H_old := int(na),  _v2H_old := float(na)
-        _scH_old  := 0
-        _lbl3B := na
-
-// 2B vs 3B: solo borra si MISMA PENDIENTE
-if not na(_tlH_prv) and not na(_tlH_old) and not na(_prvSlopeH_cln) and not na(_oldSlopeH_cln)
-    bool _sameSlopeH23 = math.abs(_prvSlopeH_cln - _oldSlopeH_cln) < _slopeTolH
-    if _sameSlopeH23
-        line.delete(_tlH_old)
-        label.delete(_lbl3B)
-        _tlH_old := na
-        _b1H_old := int(na),  _v1H_old := float(na)
-        _b2H_old := int(na),  _v2H_old := float(na)
-        _scH_old  := 0
-        _lbl3B := na
-
-// Mismo bloque para A (lows)
-float _curSlopeL_cln = not na(_b1L_cur) and not na(_b2L_cur) and _b2L_cur > _b1L_cur ? (_v2L_cur - _v1L_cur) / float(_b2L_cur - _b1L_cur) : float(na)
-float _prvSlopeL_cln = not na(_b1L_prv) and not na(_b2L_prv) and _b2L_prv > _b1L_prv ? (_v2L_prv - _v1L_prv) / float(_b2L_prv - _b1L_prv) : float(na)
-float _oldSlopeL_cln = not na(_b1L_old) and not na(_b2L_old) and _b2L_old > _b1L_old ? (_v2L_old - _v1L_old) / float(_b2L_old - _b1L_old) : float(na)
-// (Removidas _curLprojCln/_prvLprojCln/_oldLprojCln: cleanup ya no usa nivel)
-
-if not na(_tlL_prv) and not na(_curSlopeL_cln) and not na(_prvSlopeL_cln)
-    bool _sameSlopeL12 = math.abs(_curSlopeL_cln - _prvSlopeL_cln) < _slopeTolH
-    if _sameSlopeL12
-        line.delete(_tlL_prv)
-        label.delete(_lbl2A)
-        _tlL_prv := na
-        _b1L_prv := int(na),  _v1L_prv := float(na)
-        _b2L_prv := int(na),  _v2L_prv := float(na)
-        _scL_prv  := 0
-        _bkL_cnt_prv := 0
-        _lbl2A := na
-
-if not na(_tlL_old) and not na(_curSlopeL_cln) and not na(_oldSlopeL_cln)
-    bool _sameSlopeL13 = math.abs(_curSlopeL_cln - _oldSlopeL_cln) < _slopeTolH
-    if _sameSlopeL13
-        line.delete(_tlL_old)
-        label.delete(_lbl3A)
-        _tlL_old := na
-        _b1L_old := int(na),  _v1L_old := float(na)
-        _b2L_old := int(na),  _v2L_old := float(na)
-        _scL_old  := 0
-        _lbl3A := na
-
-if not na(_tlL_prv) and not na(_tlL_old) and not na(_prvSlopeL_cln) and not na(_oldSlopeL_cln)
-    bool _sameSlopeL23 = math.abs(_prvSlopeL_cln - _oldSlopeL_cln) < _slopeTolH
-    if _sameSlopeL23
-        line.delete(_tlL_old)
-        label.delete(_lbl3A)
-        _tlL_old := na
-        _b1L_old := int(na),  _v1L_old := float(na)
-        _b2L_old := int(na),  _v2L_old := float(na)
-        _scL_old  := 0
-        _lbl3A := na
+// CLEANUP REMOVIDO: con el sistema multi-tier (1=macro, 2=medium, 3=micro),
+// cada slot detecta naturalmente un nivel diferente segun su pivPer. No hay
+// duplicacion porque cada nivel mira pivotes de distinto strength.
 
 // Per-bar position updates para los 3 slots (3=cur, 2=prv, 1=old)
+// =============================================================================
+// FORCE RECREATE cada bar: paralelo a sync de labels.
+// IMPORTANTE: Pine no renderea lineas con x1 muy lejano (>~300 bars). Las
+// lineas con coords de pivotes lejanos quedan invisibles. Solucion: anclar la
+// linea en bar_index - N preservando la slope original calculada de los pivotes.
+// =============================================================================
+int _anchorOffset = 100  // bars hacia atras desde bar_index para anclar la linea
+int _maxFwd = 100        // max bars hacia adelante si no encuentra interseccion
+
+// Helper: calcula bar/y de interseccion entre 2 lineas dada slope y Y@now de cada una
+// Devuelve [bar_x, y_x]. Si paralelas o interseccion en el pasado, devuelve [bar_index + _maxFwd, projeccion]
+f_findCross(float yA, float slopeA, float yB, float slopeB) =>
+    float diff = slopeA - slopeB
+    int   _bx = bar_index + _maxFwd
+    float _yx = yA + slopeA * float(_maxFwd)
+    if math.abs(diff) > 0.0001
+        int _candBars = int((yB - yA) / diff)
+        if _candBars > 0 and _candBars <= _maxFwd
+            _bx := bar_index + _candBars
+            _yx := yA + slopeA * float(_candBars)
+    [_bx, _yx]
+
+// Slot 1B - MACRO: extend.both (linea completa)
+float _slope1B = float(na)
+float _yNow1B  = float(na)
+if not na(_b1H_cur) and not na(_b2H_cur) and _b2H_cur > _b1H_cur
+    _slope1B := (_v2H_cur - _v1H_cur) / float(_b2H_cur - _b1H_cur)
+    _yNow1B  := _v2H_cur + _slope1B * float(bar_index - _b2H_cur)
+    float _yAnc = _yNow1B - _slope1B * float(_anchorOffset)
+    line.delete(_tlH_cur)
+    _tlH_cur := line.new(bar_index - _anchorOffset, _yAnc, bar_index, _yNow1B,
+                          color=color.new(i_colH, f_tlAlpha(_scH_cur)),
+                          width=_scH_cur >= i_minTouches ? 2 : 1, extend=extend.both)
+
+// Slot 2B - MEDIUM: segmento que corta al tocar 1B
+float _slope2B = float(na)
+float _yNow2B  = float(na)
+if not na(_b1H_prv) and not na(_b2H_prv) and _b2H_prv > _b1H_prv
+    _slope2B := (_v2H_prv - _v1H_prv) / float(_b2H_prv - _b1H_prv)
+    _yNow2B  := _v2H_prv + _slope2B * float(bar_index - _b2H_prv)
+    float _yAnc = _yNow2B - _slope2B * float(_anchorOffset)
+    int _x2 = bar_index + _maxFwd
+    float _y2 = _yNow2B + _slope2B * float(_maxFwd)
+    if not na(_slope1B)
+        [bx, yx] = f_findCross(_yNow2B, _slope2B, _yNow1B, _slope1B)
+        _x2 := bx
+        _y2 := yx
+    line.delete(_tlH_prv)
+    _tlH_prv := line.new(bar_index - _anchorOffset, _yAnc, _x2, _y2,
+                          color=color.new(i_colH, 40),
+                          width=1, extend=extend.none)
+
+// Slot 3B - MICRO: segmento que corta al tocar 2B
+if not na(_b1H_old) and not na(_b2H_old) and _b2H_old > _b1H_old
+    float _slope3B = (_v2H_old - _v1H_old) / float(_b2H_old - _b1H_old)
+    float _yNow3B  = _v2H_old + _slope3B * float(bar_index - _b2H_old)
+    float _yAnc    = _yNow3B - _slope3B * float(_anchorOffset)
+    int _x2 = bar_index + _maxFwd
+    float _y2 = _yNow3B + _slope3B * float(_maxFwd)
+    if not na(_slope2B)
+        [bx, yx] = f_findCross(_yNow3B, _slope3B, _yNow2B, _slope2B)
+        _x2 := bx
+        _y2 := yx
+    line.delete(_tlH_old)
+    _tlH_old := line.new(bar_index - _anchorOffset, _yAnc, _x2, _y2,
+                          color=color.new(i_colH, 70),
+                          width=1, extend=extend.none)
+
+// Slot 1A - MACRO: extend.both
+float _slope1A = float(na)
+float _yNow1A  = float(na)
+if not na(_b1L_cur) and not na(_b2L_cur) and _b2L_cur > _b1L_cur
+    _slope1A := (_v2L_cur - _v1L_cur) / float(_b2L_cur - _b1L_cur)
+    _yNow1A  := _v2L_cur + _slope1A * float(bar_index - _b2L_cur)
+    float _yAnc = _yNow1A - _slope1A * float(_anchorOffset)
+    line.delete(_tlL_cur)
+    _tlL_cur := line.new(bar_index - _anchorOffset, _yAnc, bar_index, _yNow1A,
+                          color=color.new(i_colL, f_tlAlpha(_scL_cur)),
+                          width=_scL_cur >= i_minTouches ? 2 : 1, extend=extend.both)
+
+// Slot 2A - MEDIUM: segmento que corta al tocar 1A
+float _slope2A = float(na)
+float _yNow2A  = float(na)
+if not na(_b1L_prv) and not na(_b2L_prv) and _b2L_prv > _b1L_prv
+    _slope2A := (_v2L_prv - _v1L_prv) / float(_b2L_prv - _b1L_prv)
+    _yNow2A  := _v2L_prv + _slope2A * float(bar_index - _b2L_prv)
+    float _yAnc = _yNow2A - _slope2A * float(_anchorOffset)
+    int _x2 = bar_index + _maxFwd
+    float _y2 = _yNow2A + _slope2A * float(_maxFwd)
+    if not na(_slope1A)
+        [bx, yx] = f_findCross(_yNow2A, _slope2A, _yNow1A, _slope1A)
+        _x2 := bx
+        _y2 := yx
+    line.delete(_tlL_prv)
+    _tlL_prv := line.new(bar_index - _anchorOffset, _yAnc, _x2, _y2,
+                          color=color.new(i_colL, 40),
+                          width=1, extend=extend.none)
+
+// Slot 3A - MICRO: segmento que corta al tocar 2A
+if not na(_b1L_old) and not na(_b2L_old) and _b2L_old > _b1L_old
+    float _slope3A = (_v2L_old - _v1L_old) / float(_b2L_old - _b1L_old)
+    float _yNow3A  = _v2L_old + _slope3A * float(bar_index - _b2L_old)
+    float _yAnc    = _yNow3A - _slope3A * float(_anchorOffset)
+    int _x2 = bar_index + _maxFwd
+    float _y2 = _yNow3A + _slope3A * float(_maxFwd)
+    if not na(_slope2A)
+        [bx, yx] = f_findCross(_yNow3A, _slope3A, _yNow2A, _slope2A)
+        _x2 := bx
+        _y2 := yx
+    line.delete(_tlL_old)
+    _tlL_old := line.new(bar_index - _anchorOffset, _yAnc, _x2, _y2,
+                          color=color.new(i_colL, 70),
+                          width=1, extend=extend.none)
+
+if not na(_b1BK_cur) and not na(_b2BK_cur) and _b2BK_cur > _b1BK_cur
+    float _slopeBK = (_v2BK_cur - _v1BK_cur) / float(_b2BK_cur - _b1BK_cur)
+    float _yNowBK  = _v2BK_cur + _slopeBK * float(bar_index - _b2BK_cur)
+    float _yAncBK  = _yNowBK - _slopeBK * float(_anchorOffset)
+    line.delete(_tlBK_cur)
+    _tlBK_cur := line.new(bar_index - _anchorOffset, _yAncBK, bar_index, _yNowBK,
+                          color=color.new(i_colBK, f_tlAlpha(_scBK_cur)),
+                          width=2, style=line.style_dashed, extend=extend.both)
+
+// HTF lines ancladas: convertimos slope-por-ms a slope-por-bar para usar xloc.bar_index
+// Esto garantiza que line y label conecten exactamente al bar actual sin drift visual.
+int _tfMs = timeframe.in_seconds(timeframe.period) * 1000
+
+if not na(_h1rP1) and not na(_h1rP2) and not na(_h1rT1) and not na(_h1rT2) and _h1rT2 > _h1rT1 and not na(htf1H_now)
+    float _slopeH1Hms  = (_h1rP2 - _h1rP1) / float(_h1rT2 - _h1rT1)
+    float _slopeH1Hbar = _slopeH1Hms * float(_tfMs)
+    float _yAncH1H     = htf1H_now - _slopeH1Hbar * float(_anchorOffset)
+    line.delete(_htf1H_line)
+    _htf1H_line := line.new(bar_index - _anchorOffset, _yAncH1H, bar_index, htf1H_now,
+                            color=i_colHTF1H, width=3, style=line.style_dashed, extend=extend.both)
+
+if not na(_h1sP1) and not na(_h1sP2) and not na(_h1sT1) and not na(_h1sT2) and _h1sT2 > _h1sT1 and not na(htf1L_now)
+    float _slopeH1Lms  = (_h1sP2 - _h1sP1) / float(_h1sT2 - _h1sT1)
+    float _slopeH1Lbar = _slopeH1Lms * float(_tfMs)
+    float _yAncH1L     = htf1L_now - _slopeH1Lbar * float(_anchorOffset)
+    line.delete(_htf1L_line)
+    _htf1L_line := line.new(bar_index - _anchorOffset, _yAncH1L, bar_index, htf1L_now,
+                            color=i_colHTF1L, width=3, style=line.style_dashed, extend=extend.both)
+
+if not na(_h2rP1) and not na(_h2rP2) and not na(_h2rT1) and not na(_h2rT2) and _h2rT2 > _h2rT1 and not na(htf2H_now)
+    float _slopeH2Hms  = (_h2rP2 - _h2rP1) / float(_h2rT2 - _h2rT1)
+    float _slopeH2Hbar = _slopeH2Hms * float(_tfMs)
+    float _yAncH2H     = htf2H_now - _slopeH2Hbar * float(_anchorOffset)
+    line.delete(_htf2H_line)
+    _htf2H_line := line.new(bar_index - _anchorOffset, _yAncH2H, bar_index, htf2H_now,
+                            color=i_colHTF2H, width=4, style=line.style_solid, extend=extend.both)
+
+if not na(_h2sP1) and not na(_h2sP2) and not na(_h2sT1) and not na(_h2sT2) and _h2sT2 > _h2sT1 and not na(htf2L_now)
+    float _slopeH2Lms  = (_h2sP2 - _h2sP1) / float(_h2sT2 - _h2sT1)
+    float _slopeH2Lbar = _slopeH2Lms * float(_tfMs)
+    float _yAncH2L     = htf2L_now - _slopeH2Lbar * float(_anchorOffset)
+    line.delete(_htf2L_line)
+    _htf2L_line := line.new(bar_index - _anchorOffset, _yAncH2L, bar_index, htf2L_now,
+                            color=i_colHTF2L, width=4, style=line.style_solid, extend=extend.both)
+
 float _oldH_now = f_proj(_b1H_old, _v1H_old, _b2H_old, _v2H_old)
 float _oldL_now = f_proj(_b1L_old, _v1L_old, _b2L_old, _v2L_old)
 if not na(_lbl1B) and not na(_curH_now)
@@ -1080,166 +1013,6 @@ if not na(_prvL_now) and close < _prvL_now - _bkMinDist and _volOK and _bodyBelo
 else
     _bkL_cnt_prv := 0
 
-// =============================================================================
-// DEBUG TABLE: estado de TODAS las lineas en una tabla esquina del chart
-// =============================================================================
-if i_backtesting
-    if na(_dbgTable)
-        _dbgTable := table.new(position.bottom_right, 5, 12,
-                               bgcolor=color.new(color.black, 20),
-                               border_width=1, border_color=color.new(color.gray, 50))
-        // Headers
-        table.cell(_dbgTable, 0, 0, "LINE",   text_color=color.yellow, bgcolor=color.new(color.gray, 70), text_size=size.small)
-        table.cell(_dbgTable, 1, 0, "Ref",    text_color=color.yellow, bgcolor=color.new(color.gray, 70), text_size=size.small)
-        table.cell(_dbgTable, 2, 0, "x1",     text_color=color.yellow, bgcolor=color.new(color.gray, 70), text_size=size.small)
-        table.cell(_dbgTable, 3, 0, "Alive",  text_color=color.yellow, bgcolor=color.new(color.gray, 70), text_size=size.small)
-        table.cell(_dbgTable, 4, 0, "Score",  text_color=color.yellow, bgcolor=color.new(color.gray, 70), text_size=size.small)
-
-    // Helper inline para checkear cada linea
-    int _dbT_tlH_x1   = na(_tlH_cur)    ? int(na) : line.get_x1(_tlH_cur)
-    int _dbT_tlHp_x1  = na(_tlH_prv)    ? int(na) : line.get_x1(_tlH_prv)
-    int _dbT_tlHo_x1  = na(_tlH_old)    ? int(na) : line.get_x1(_tlH_old)
-    int _dbT_tlL_x1   = na(_tlL_cur)    ? int(na) : line.get_x1(_tlL_cur)
-    int _dbT_tlLp_x1  = na(_tlL_prv)    ? int(na) : line.get_x1(_tlL_prv)
-    int _dbT_tlLo_x1  = na(_tlL_old)    ? int(na) : line.get_x1(_tlL_old)
-    int _dbT_bk_x1    = na(_tlBK_cur)   ? int(na) : line.get_x1(_tlBK_cur)
-    int _dbT_h1H_x1   = na(_htf1H_line) ? int(na) : line.get_x1(_htf1H_line)
-    int _dbT_h1L_x1   = na(_htf1L_line) ? int(na) : line.get_x1(_htf1L_line)
-    int _dbT_h2H_x1   = na(_htf2H_line) ? int(na) : line.get_x1(_htf2H_line)
-    int _dbT_h2L_x1   = na(_htf2L_line) ? int(na) : line.get_x1(_htf2L_line)
-
-    // Helper para "alive" status
-    f_aliveStatus(line ln, int x1) =>
-        bool _alive = not na(ln) and not na(x1)
-        [_alive ? "YES" : "NO", _alive ? color.lime : color.red]
-    [_a1, _c1]   = f_aliveStatus(_tlH_cur,    _dbT_tlH_x1)
-    [_a2, _c2]   = f_aliveStatus(_tlH_prv,    _dbT_tlHp_x1)
-    [_a3, _c3]   = f_aliveStatus(_tlH_old,    _dbT_tlHo_x1)
-    [_a4, _c4]   = f_aliveStatus(_tlL_cur,    _dbT_tlL_x1)
-    [_a5, _c5]   = f_aliveStatus(_tlL_prv,    _dbT_tlLp_x1)
-    [_a6, _c6]   = f_aliveStatus(_tlL_old,    _dbT_tlLo_x1)
-    [_a7, _c7]   = f_aliveStatus(_tlBK_cur,   _dbT_bk_x1)
-    [_a8, _c8]   = f_aliveStatus(_htf1H_line, _dbT_h1H_x1)
-    [_a9, _c9]   = f_aliveStatus(_htf1L_line, _dbT_h1L_x1)
-    [_a10, _c10] = f_aliveStatus(_htf2H_line, _dbT_h2H_x1)
-    [_a11, _c11] = f_aliveStatus(_htf2L_line, _dbT_h2L_x1)
-
-    // Llenar filas
-    table.cell(_dbgTable, 0, 1, "1B (H cur)", text_color=color.white, text_size=size.small)
-    table.cell(_dbgTable, 1, 1, na(_tlH_cur) ? "NA" : "ok", text_color=color.white, text_size=size.small)
-    table.cell(_dbgTable, 2, 1, na(_dbT_tlH_x1) ? "-" : str.tostring(_dbT_tlH_x1), text_color=color.white, text_size=size.small)
-    table.cell(_dbgTable, 3, 1, _a1, text_color=_c1, text_size=size.small)
-    table.cell(_dbgTable, 4, 1, str.tostring(_scH_cur), text_color=color.white, text_size=size.small)
-
-    table.cell(_dbgTable, 0, 2, "2B (H prv)", text_color=color.white, text_size=size.small)
-    table.cell(_dbgTable, 1, 2, na(_tlH_prv) ? "NA" : "ok", text_color=color.white, text_size=size.small)
-    table.cell(_dbgTable, 2, 2, na(_dbT_tlHp_x1) ? "-" : str.tostring(_dbT_tlHp_x1), text_color=color.white, text_size=size.small)
-    table.cell(_dbgTable, 3, 2, _a2, text_color=_c2, text_size=size.small)
-    table.cell(_dbgTable, 4, 2, str.tostring(_scH_prv), text_color=color.white, text_size=size.small)
-
-    table.cell(_dbgTable, 0, 3, "3B (H old)", text_color=color.white, text_size=size.small)
-    table.cell(_dbgTable, 1, 3, na(_tlH_old) ? "NA" : "ok", text_color=color.white, text_size=size.small)
-    table.cell(_dbgTable, 2, 3, na(_dbT_tlHo_x1) ? "-" : str.tostring(_dbT_tlHo_x1), text_color=color.white, text_size=size.small)
-    table.cell(_dbgTable, 3, 3, _a3, text_color=_c3, text_size=size.small)
-    table.cell(_dbgTable, 4, 3, str.tostring(_scH_old), text_color=color.white, text_size=size.small)
-
-    table.cell(_dbgTable, 0, 4, "1A (L cur)", text_color=color.white, text_size=size.small)
-    table.cell(_dbgTable, 1, 4, na(_tlL_cur) ? "NA" : "ok", text_color=color.white, text_size=size.small)
-    table.cell(_dbgTable, 2, 4, na(_dbT_tlL_x1) ? "-" : str.tostring(_dbT_tlL_x1), text_color=color.white, text_size=size.small)
-    table.cell(_dbgTable, 3, 4, _a4, text_color=_c4, text_size=size.small)
-    table.cell(_dbgTable, 4, 4, str.tostring(_scL_cur), text_color=color.white, text_size=size.small)
-
-    table.cell(_dbgTable, 0, 5, "2A (L prv)", text_color=color.white, text_size=size.small)
-    table.cell(_dbgTable, 1, 5, na(_tlL_prv) ? "NA" : "ok", text_color=color.white, text_size=size.small)
-    table.cell(_dbgTable, 2, 5, na(_dbT_tlLp_x1) ? "-" : str.tostring(_dbT_tlLp_x1), text_color=color.white, text_size=size.small)
-    table.cell(_dbgTable, 3, 5, _a5, text_color=_c5, text_size=size.small)
-    table.cell(_dbgTable, 4, 5, str.tostring(_scL_prv), text_color=color.white, text_size=size.small)
-
-    table.cell(_dbgTable, 0, 6, "3A (L old)", text_color=color.white, text_size=size.small)
-    table.cell(_dbgTable, 1, 6, na(_tlL_old) ? "NA" : "ok", text_color=color.white, text_size=size.small)
-    table.cell(_dbgTable, 2, 6, na(_dbT_tlLo_x1) ? "-" : str.tostring(_dbT_tlLo_x1), text_color=color.white, text_size=size.small)
-    table.cell(_dbgTable, 3, 6, _a6, text_color=_c6, text_size=size.small)
-    table.cell(_dbgTable, 4, 6, str.tostring(_scL_old), text_color=color.white, text_size=size.small)
-
-    table.cell(_dbgTable, 0, 7, "BK", text_color=color.white, text_size=size.small)
-    table.cell(_dbgTable, 1, 7, na(_tlBK_cur) ? "NA" : "ok", text_color=color.white, text_size=size.small)
-    table.cell(_dbgTable, 2, 7, na(_dbT_bk_x1) ? "-" : str.tostring(_dbT_bk_x1), text_color=color.white, text_size=size.small)
-    table.cell(_dbgTable, 3, 7, _a7, text_color=_c7, text_size=size.small)
-    table.cell(_dbgTable, 4, 7, str.tostring(_scBK_cur), text_color=color.white, text_size=size.small)
-
-    table.cell(_dbgTable, 0, 8, "HTF1B", text_color=color.white, text_size=size.small)
-    table.cell(_dbgTable, 1, 8, na(_htf1H_line) ? "NA" : "ok", text_color=color.white, text_size=size.small)
-    table.cell(_dbgTable, 2, 8, na(_dbT_h1H_x1) ? "-" : str.tostring(_dbT_h1H_x1), text_color=color.white, text_size=size.small)
-    table.cell(_dbgTable, 3, 8, _a8, text_color=_c8, text_size=size.small)
-    table.cell(_dbgTable, 4, 8, "-", text_color=color.white, text_size=size.small)
-
-    table.cell(_dbgTable, 0, 9, "HTF1A", text_color=color.white, text_size=size.small)
-    table.cell(_dbgTable, 1, 9, na(_htf1L_line) ? "NA" : "ok", text_color=color.white, text_size=size.small)
-    table.cell(_dbgTable, 2, 9, na(_dbT_h1L_x1) ? "-" : str.tostring(_dbT_h1L_x1), text_color=color.white, text_size=size.small)
-    table.cell(_dbgTable, 3, 9, _a9, text_color=_c9, text_size=size.small)
-    table.cell(_dbgTable, 4, 9, "-", text_color=color.white, text_size=size.small)
-
-    table.cell(_dbgTable, 0, 10, "HTF4B", text_color=color.white, text_size=size.small)
-    table.cell(_dbgTable, 1, 10, na(_htf2H_line) ? "NA" : "ok", text_color=color.white, text_size=size.small)
-    table.cell(_dbgTable, 2, 10, na(_dbT_h2H_x1) ? "-" : str.tostring(_dbT_h2H_x1), text_color=color.white, text_size=size.small)
-    table.cell(_dbgTable, 3, 10, _a10, text_color=_c10, text_size=size.small)
-    table.cell(_dbgTable, 4, 10, "-", text_color=color.white, text_size=size.small)
-
-    table.cell(_dbgTable, 0, 11, "HTF4A", text_color=color.white, text_size=size.small)
-    table.cell(_dbgTable, 1, 11, na(_htf2L_line) ? "NA" : "ok", text_color=color.white, text_size=size.small)
-    table.cell(_dbgTable, 2, 11, na(_dbT_h2L_x1) ? "-" : str.tostring(_dbT_h2L_x1), text_color=color.white, text_size=size.small)
-    table.cell(_dbgTable, 3, 11, _a11, text_color=_c11, text_size=size.small)
-    table.cell(_dbgTable, 4, 11, "-", text_color=color.white, text_size=size.small)
-
-// Debug labels (solo cuando i_backtesting activo) - muestran estado de contadores BK
-if i_backtesting
-    string _dH = "H cntCur=" + str.tostring(_bkH_cnt_cur) +
-                 " cntPrv=" + str.tostring(_bkH_cnt_prv) +
-                 "\nscCur=" + str.tostring(_scH_cur) +
-                 " scPrv=" + str.tostring(_scH_prv) +
-                 "\nclsCur=" + (not na(_curH_now) ? str.tostring(close - _curH_now, format.mintick) : "na") +
-                 " clsPrv=" + (not na(_prvH_now) ? str.tostring(close - _prvH_now, format.mintick) : "na") +
-                 "\ndist=" + str.tostring(_bkMinDist, format.mintick) +
-                 "\nb2c=" + str.tostring(_b2H_cur) +
-                 " b2p=" + str.tostring(_b2H_prv) +
-                 " src=" + str.tostring(_bkH_src_b2) +
-                 "\n--- HTF ---" +
-                 "\nH1B=" + (not na(htf1H_now) ? str.tostring(htf1H_now, format.mintick) : "na") +
-                 " (d=" + (not na(htf1H_now) ? str.tostring(htf1H_now - close, format.mintick) : "na") + ")" +
-                 "\nH4B=" + (not na(htf2H_now) ? str.tostring(htf2H_now, format.mintick) : "na") +
-                 " (d=" + (not na(htf2H_now) ? str.tostring(htf2H_now - close, format.mintick) : "na") + ")"
-    if na(_dbgH)
-        _dbgH := label.new(bar_index, high + atrVal * 3, _dH,
-                           style=label.style_label_down, color=color.new(color.blue, 70),
-                           textcolor=color.white, size=size.normal)
-    else
-        label.set_x(_dbgH, bar_index)
-        label.set_y(_dbgH, high + atrVal * 3)
-        label.set_text(_dbgH, _dH)
-    string _dL = "L cntCur=" + str.tostring(_bkL_cnt_cur) +
-                 " cntPrv=" + str.tostring(_bkL_cnt_prv) +
-                 "\nscCur=" + str.tostring(_scL_cur) +
-                 " scPrv=" + str.tostring(_scL_prv) +
-                 "\nclsCur=" + (not na(_curL_now) ? str.tostring(close - _curL_now, format.mintick) : "na") +
-                 " clsPrv=" + (not na(_prvL_now) ? str.tostring(close - _prvL_now, format.mintick) : "na") +
-                 "\ndist=" + str.tostring(_bkMinDist, format.mintick) +
-                 "\nb2c=" + str.tostring(_b2L_cur) +
-                 " b2p=" + str.tostring(_b2L_prv) +
-                 " src=" + str.tostring(_bkL_src_b2) +
-                 "\n--- HTF ---" +
-                 "\nH1A=" + (not na(htf1L_now) ? str.tostring(htf1L_now, format.mintick) : "na") +
-                 " (d=" + (not na(htf1L_now) ? str.tostring(close - htf1L_now, format.mintick) : "na") + ")" +
-                 "\nH4A=" + (not na(htf2L_now) ? str.tostring(htf2L_now, format.mintick) : "na") +
-                 " (d=" + (not na(htf2L_now) ? str.tostring(close - htf2L_now, format.mintick) : "na") + ")"
-    if na(_dbgL)
-        _dbgL := label.new(bar_index, low - atrVal * 3, _dL,
-                           style=label.style_label_up, color=color.new(color.purple, 70),
-                           textcolor=color.white, size=size.normal)
-    else
-        label.set_x(_dbgL, bar_index)
-        label.set_y(_dbgL, low - atrVal * 3)
-        label.set_text(_dbgL, _dL)
-
 // Bloque de rotacion BK inlineado (restriccion v6: no puede modificar vars globales en funcion)
 // Break confirmado cuando el contador supera i_bkConfirmBars (>= para no depender del frame exacto)
 // Guard de duplicados: si la BK candidata proyecta cerca de la BK actual, es la misma tendencia
@@ -1264,7 +1037,7 @@ if _bkH_cnt_cur >= i_bkConfirmBars and (na(_bkH_src_b2) or _b2H_cur != _bkH_src_
     _scBK_cur := _scH_cur,  _bkFromH_cur := true,  _bkSlope_cur := _v2H_cur < _v1H_cur
     _tlBK_cur := line.new(_b1H_cur, _v1H_cur, _b2H_cur, _v2H_cur,
                           color=color.new(i_colBK, f_tlAlpha(_scH_cur)),
-                          width=2, style=line.style_dashed, extend=extend.right)
+                          width=2, style=line.style_dashed, extend=extend.both)
     _lbl3BK := label.new(bar_index + 3, _v2H_cur, "1BK",
                          color=color.new(i_colBK, 70), textcolor=i_colBK,
                          style=label.style_label_left, size=size.small)
@@ -1282,33 +1055,8 @@ if _bkH_cnt_cur >= i_bkConfirmBars and (na(_bkH_src_b2) or _b2H_cur != _bkH_src_
     _scH_cur := 0
     _bkH_cnt_cur := 0
 
-// Break de 2B (prv slot) cuando 1B sigue intacta - slot unico, BK vieja se elimina
-else if _bkH_cnt_prv >= i_bkConfirmBars and (na(_bkH_src_b2) or _b2H_prv != _bkH_src_b2) and _scH_prv >= i_bkMinTouches and not _dup2B
-    _bkH_src_b2 := _b2H_prv
-    line.delete(_tlBK_cur)
-    label.delete(_lbl3BK)
-    _b1BK_cur := _b1H_prv,  _v1BK_cur := _v1H_prv
-    _b2BK_cur := _b2H_prv,  _v2BK_cur := _v2H_prv
-    _scBK_cur := _scH_prv,  _bkFromH_cur := true,  _bkSlope_cur := _v2H_prv < _v1H_prv
-    _tlBK_cur := line.new(_b1H_prv, _v1H_prv, _b2H_prv, _v2H_prv,
-                          color=color.new(i_colBK, f_tlAlpha(_scH_prv)),
-                          width=2, style=line.style_dashed, extend=extend.right)
-    _lbl3BK := label.new(bar_index + 3, _v2H_prv, "1BK",
-                         color=color.new(i_colBK, 70), textcolor=i_colBK,
-                         style=label.style_label_left, size=size.small)
-    // Label estatico en barra de confirmacion del break (2B rota al alza)
-    label.new(bar_index, high + atrVal * 0.3, "BK 2B",
-              style=label.style_label_down,
-              color=color.new(i_colBK, 30), textcolor=color.white, size=size.tiny)
-    _bk_judas_until := bar_index + i_bkJudasBars
-    _bkTouchCount   := 0
-    _bkInZonePrev   := false
-    line.delete(_tlH_prv)
-    label.delete(_lbl2B)
-    _tlH_prv := na
-    _lbl2B   := na
-    _scH_prv := 0
-    _bkH_cnt_prv := 0
+// BK 2B/3B REMOVIDO: en sistema multi-tier solo se opera con breaks de 1B (macro).
+// Los slots 2/3 son zoom contextual, no senales de entrada.
 
 // Break de 1A (cur slot) - slot unico, BK vieja se elimina
 if _bkL_cnt_cur >= i_bkConfirmBars and (na(_bkL_src_b2) or _b2L_cur != _bkL_src_b2) and _scL_cur >= i_bkMinTouches and not _dup1A
@@ -1320,7 +1068,7 @@ if _bkL_cnt_cur >= i_bkConfirmBars and (na(_bkL_src_b2) or _b2L_cur != _bkL_src_
     _scBK_cur := _scL_cur,  _bkFromH_cur := false,  _bkSlope_cur := _v2L_cur > _v1L_cur
     _tlBK_cur := line.new(_b1L_cur, _v1L_cur, _b2L_cur, _v2L_cur,
                           color=color.new(i_colBK, f_tlAlpha(_scL_cur)),
-                          width=2, style=line.style_dashed, extend=extend.right)
+                          width=2, style=line.style_dashed, extend=extend.both)
     _lbl3BK := label.new(bar_index + 3, _v2L_cur, "1BK",
                          color=color.new(i_colBK, 70), textcolor=i_colBK,
                          style=label.style_label_left, size=size.small)
@@ -1338,33 +1086,7 @@ if _bkL_cnt_cur >= i_bkConfirmBars and (na(_bkL_src_b2) or _b2L_cur != _bkL_src_
     _scL_cur := 0
     _bkL_cnt_cur := 0
 
-// Break de 2A (prv slot) cuando 1A sigue intacta - slot unico, BK vieja se elimina
-else if _bkL_cnt_prv >= i_bkConfirmBars and (na(_bkL_src_b2) or _b2L_prv != _bkL_src_b2) and _scL_prv >= i_bkMinTouches and not _dup2A
-    _bkL_src_b2 := _b2L_prv
-    line.delete(_tlBK_cur)
-    label.delete(_lbl3BK)
-    _b1BK_cur := _b1L_prv,  _v1BK_cur := _v1L_prv
-    _b2BK_cur := _b2L_prv,  _v2BK_cur := _v2L_prv
-    _scBK_cur := _scL_prv,  _bkFromH_cur := false,  _bkSlope_cur := _v2L_prv > _v1L_prv
-    _tlBK_cur := line.new(_b1L_prv, _v1L_prv, _b2L_prv, _v2L_prv,
-                          color=color.new(i_colBK, f_tlAlpha(_scL_prv)),
-                          width=2, style=line.style_dashed, extend=extend.right)
-    _lbl3BK := label.new(bar_index + 3, _v2L_prv, "1BK",
-                         color=color.new(i_colBK, 70), textcolor=i_colBK,
-                         style=label.style_label_left, size=size.small)
-    // Label estatico en barra de confirmacion del break (2A rota a la baja)
-    label.new(bar_index, low - atrVal * 0.3, "BK 2A",
-              style=label.style_label_up,
-              color=color.new(i_colBK, 30), textcolor=color.white, size=size.tiny)
-    _bk_judas_until := bar_index + i_bkJudasBars
-    _bkTouchCount   := 0
-    _bkInZonePrev   := false
-    line.delete(_tlL_prv)
-    label.delete(_lbl2A)
-    _tlL_prv := na
-    _lbl2A   := na
-    _scL_prv := 0
-    _bkL_cnt_prv := 0
+// BK 2A/3A REMOVIDO: en sistema multi-tier solo se opera con breaks de 1A (macro).
 
 // =============================================================================
 // JUDAS FILTER - invalida BK si dentro de la ventana de vigilancia el precio
@@ -1396,7 +1118,7 @@ if not na(_bk_judas_until) and bar_index <= _bk_judas_until and not na(_tlBK_cur
                 _bkH_cnt_cur := 0
                 _tlH_cur := line.new(_b1H_cur, _v1H_cur, _b2H_cur, _v2H_cur,
                                       color=color.new(i_colH, f_tlAlpha(_scH_cur)),
-                                      width=_scH_cur >= i_minTouches ? 2 : 1, extend=extend.right)
+                                      width=_scH_cur >= i_minTouches ? 2 : 1, extend=extend.both)
                 _lbl1B := label.new(bar_index + 3, _v2H_cur, "1B",
                                      color=color.new(i_colH, 70), textcolor=i_colH,
                                      style=label.style_label_left, size=size.small)
@@ -1422,7 +1144,7 @@ if not na(_bk_judas_until) and bar_index <= _bk_judas_until and not na(_tlBK_cur
                 _bkH_cnt_cur := 0
                 _tlH_cur := line.new(_b1H_cur, _v1H_cur, _b2H_cur, _v2H_cur,
                                       color=color.new(i_colH, f_tlAlpha(_scH_cur)),
-                                      width=_scH_cur >= i_minTouches ? 2 : 1, extend=extend.right)
+                                      width=_scH_cur >= i_minTouches ? 2 : 1, extend=extend.both)
                 _lbl1B := label.new(bar_index + 3, _v2H_cur, "1B",
                                      color=color.new(i_colH, 70), textcolor=i_colH,
                                      style=label.style_label_left, size=size.small)
@@ -1439,7 +1161,7 @@ if not na(_bk_judas_until) and bar_index <= _bk_judas_until and not na(_tlBK_cur
                 _bkL_cnt_cur := 0
                 _tlL_cur := line.new(_b1L_cur, _v1L_cur, _b2L_cur, _v2L_cur,
                                       color=color.new(i_colL, f_tlAlpha(_scL_cur)),
-                                      width=_scL_cur >= i_minTouches ? 2 : 1, extend=extend.right)
+                                      width=_scL_cur >= i_minTouches ? 2 : 1, extend=extend.both)
                 _lbl1A := label.new(bar_index + 3, _v2L_cur, "1A",
                                      color=color.new(i_colL, 70), textcolor=i_colL,
                                      style=label.style_label_left, size=size.small)
@@ -1464,7 +1186,7 @@ if not na(_bk_judas_until) and bar_index <= _bk_judas_until and not na(_tlBK_cur
                 _bkL_cnt_cur := 0
                 _tlL_cur := line.new(_b1L_cur, _v1L_cur, _b2L_cur, _v2L_cur,
                                       color=color.new(i_colL, f_tlAlpha(_scL_cur)),
-                                      width=_scL_cur >= i_minTouches ? 2 : 1, extend=extend.right)
+                                      width=_scL_cur >= i_minTouches ? 2 : 1, extend=extend.both)
                 _lbl1A := label.new(bar_index + 3, _v2L_cur, "1A",
                                      color=color.new(i_colL, 70), textcolor=i_colL,
                                      style=label.style_label_left, size=size.small)
@@ -1519,7 +1241,7 @@ if not na(_tlBK_cur)
                 _bkH_cnt_cur := 0
                 _tlH_cur := line.new(_b1H_cur, _v1H_cur, _b2H_cur, _v2H_cur,
                                       color=color.new(i_colH, f_tlAlpha(_scH_cur)),
-                                      width=_scH_cur >= i_minTouches ? 2 : 1, extend=extend.right)
+                                      width=_scH_cur >= i_minTouches ? 2 : 1, extend=extend.both)
                 _lbl1B := label.new(bar_index + 3, _v2H_cur, "1B",
                                      color=color.new(i_colH, 70), textcolor=i_colH,
                                      style=label.style_label_left, size=size.small)
@@ -1545,7 +1267,7 @@ if not na(_tlBK_cur)
                 _bkH_cnt_cur := 0
                 _tlH_cur := line.new(_b1H_cur, _v1H_cur, _b2H_cur, _v2H_cur,
                                       color=color.new(i_colH, f_tlAlpha(_scH_cur)),
-                                      width=_scH_cur >= i_minTouches ? 2 : 1, extend=extend.right)
+                                      width=_scH_cur >= i_minTouches ? 2 : 1, extend=extend.both)
                 _lbl1B := label.new(bar_index + 3, _v2H_cur, "1B",
                                      color=color.new(i_colH, 70), textcolor=i_colH,
                                      style=label.style_label_left, size=size.small)
@@ -1558,7 +1280,7 @@ if not na(_tlBK_cur)
                 _bkL_cnt_cur := 0
                 _tlL_cur := line.new(_b1L_cur, _v1L_cur, _b2L_cur, _v2L_cur,
                                       color=color.new(i_colL, f_tlAlpha(_scL_cur)),
-                                      width=_scL_cur >= i_minTouches ? 2 : 1, extend=extend.right)
+                                      width=_scL_cur >= i_minTouches ? 2 : 1, extend=extend.both)
                 _lbl1A := label.new(bar_index + 3, _v2L_cur, "1A",
                                      color=color.new(i_colL, 70), textcolor=i_colL,
                                      style=label.style_label_left, size=size.small)
@@ -1584,7 +1306,7 @@ if not na(_tlBK_cur)
                 _bkL_cnt_cur := 0
                 _tlL_cur := line.new(_b1L_cur, _v1L_cur, _b2L_cur, _v2L_cur,
                                       color=color.new(i_colL, f_tlAlpha(_scL_cur)),
-                                      width=_scL_cur >= i_minTouches ? 2 : 1, extend=extend.right)
+                                      width=_scL_cur >= i_minTouches ? 2 : 1, extend=extend.both)
                 _lbl1A := label.new(bar_index + 3, _v2L_cur, "1A",
                                      color=color.new(i_colL, 70), textcolor=i_colL,
                                      style=label.style_label_left, size=size.small)
@@ -1699,40 +1421,6 @@ bool bkBearSig = (not na(tlBK_now) and not _bkIsH
     and _bkFilter
     and not _tradeOpen
     and _sesOK and _inTradeHours)
-
-// Debug BK signal: muestra que condicion esta bloqueando un retest cercano
-if i_backtesting and not na(tlBK_now)
-    float _diff   = math.abs(close - tlBK_now)
-    bool  _near   = _diff < atrVal * 1.5
-    if _near
-        bool _c_bullRej = _bkIsH and f_bullRej(tlBK_now)
-        bool _c_bearRej = not _bkIsH and f_bearRej(tlBK_now)
-        bool _c_filter  = _bkFilter
-        bool _c_notOpen = not _tradeOpen
-        bool _c_ses     = _sesOK
-        bool _c_hours   = _inTradeHours
-        float _wickRatio = _range > 0 ? (_bkIsH ? _dnWick : _upWick) / _range : 0
-        string _dBK = "BK " + (_bkIsH ? "(H->LONG)" : "(L->SHORT)") +
-                     "\nlvl=" + str.tostring(tlBK_now, format.mintick) +
-                     " close=" + str.tostring(close, format.mintick) +
-                     "\nrej=" + str.tostring(_bkIsH ? _c_bullRej : _c_bearRej) +
-                     " filter=" + str.tostring(_c_filter) +
-                     "\nnotOpen=" + str.tostring(_c_notOpen) +
-                     " ses=" + str.tostring(_c_ses) +
-                     " hr=" + str.tostring(_c_hours) +
-                     "\nwick%=" + str.tostring(_wickRatio * 100, "#.#") +
-                     " (need " + str.tostring(i_wickRatio * 100, "#.#") + ")" +
-                     "\ncls[1]=" + str.tostring(close[1], format.mintick) +
-                     "\nlow=" + str.tostring(low, format.mintick) +
-                     " high=" + str.tostring(high, format.mintick)
-        if na(_dbgBK)
-            _dbgBK := label.new(bar_index, tlBK_now + atrVal * 2, _dBK,
-                               style=label.style_label_left, color=color.new(color.orange, 70),
-                               textcolor=color.white, size=size.normal)
-        else
-            label.set_x(_dbgBK, bar_index)
-            label.set_y(_dbgBK, tlBK_now + atrVal * 2)
-            label.set_text(_dbgBK, _dBK)
 
 plotshape(bearSig,   "SHORT entrada",    location=location.abovebar,
           color=i_colH,  style=shape.triangledown, size=size.small)
@@ -2238,18 +1926,6 @@ if _justFilled
                         "TP 1:3  $" + str.tostring(math.round(i_riskUSD * 3)),
                         style=label.style_label_center,
                         color=color.new(#26A69A, 65), textcolor=color.white, size=size.tiny)
-
-        // Backtesting label con precio REAL de fill
-        if i_backtesting
-            label _lbl = label.new(bar_index, _isLong ? _slUsed - atrVal * 0.3 : _slUsed + atrVal * 0.3,
-                          _typ + "  Ses: " + _ses +
-                          "\nE: "   + str.tostring(_eFill,  format.mintick) +
-                          "  SL: " + str.tostring(_slUsed, format.mintick) +
-                          "\nRiesgo: $"  + str.tostring(math.round(i_riskUSD)) +
-                          "  Profit 1:2: $" + str.tostring(math.round(i_riskUSD * 2)),
-                          style=_isLong ? label.style_label_up : label.style_label_down,
-                          color=color.new(_isLong ? i_colL : i_colH, 10),
-                          textcolor=color.white, size=size.small)
 
     // Cancelar TODAS las ordenes pendientes (la que se lleno ya no existe, las otras 3 podrian flipearnos)
     strategy.cancel("LONG-L")
