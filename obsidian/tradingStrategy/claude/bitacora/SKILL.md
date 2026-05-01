@@ -2,13 +2,16 @@
 name: bitacora
 description: >
   Registrar entrada en bitacora.md cuando el usuario diga "bitacora", "hagamos bitacora",
-  "anota bitacora" o frases similares. Cada entrada vincula un commit con metricas
-  reales del backtest (profit, drawdown, trades, win rate) para tener un historial
-  evolutivo de la estrategia. CRITICO: antes de registrar, verificar que el usuario
-  haya hecho ship con Claude Code. Si no se confirma explicitamente "ya hice ship"
-  o equivalente, preguntar primero. El usuario adjunta una imagen del informe de
-  TradingView con las metricas. Esta skill toma el ultimo commit, extrae datos de la
-  imagen, agrega una fila a la tabla de bitacora.md, y muestra un resumen de progreso.
+  "anota bitacora", "agrega un feature a bitacora", "feature aprobado", o frases
+  similares. Cada entrada vincula un commit/feature con metricas reales del backtest
+  (profit, drawdown, trades, win rate) para tener un historial evolutivo de la
+  estrategia. Soporta dos tipos de entrada: (1) ENTRADA SHIPPEADA - requiere commit
+  hecho con Claude Code, tiene commit ID; (2) FEATURE WIP - en experimentacion, sin
+  commit aun, se puede actualizar multiples veces hasta aprobacion. Al aprobar el
+  feature (usuario dice "feature aprobado"), se convierte en entrada shippeada con
+  su propio commit ID. El usuario adjunta una imagen del informe de TradingView con
+  las metricas en cada actualizacion. Las features se marcan con [FEATURE WIP] en
+  la tabla y se eliminan/actualizan al ser aprobadas.
 ---
 
 # Strategy Bitacora Skill
@@ -17,24 +20,53 @@ Skill para llevar un historial evolutivo de la estrategia: cada commit ↔ metri
 
 ## Cuando usar
 
+Tres modos de uso segun el trigger:
+
+### Modo A: Entrada shippeada (commit nuevo)
 Cuando el usuario diga:
 - "bitacora"
 - "hagamos bitacora"
 - "anota bitacora"
 - "registra en bitacora"
-- "vamos a hacer bitacora"
 
-## Pre-condiciones obligatorias
+→ El usuario YA hizo ship. Tomamos commit ID y agregamos fila permanente.
 
-ANTES de hacer cualquier cosa:
+### Modo B: Feature WIP (experimentacion sin commit)
+Cuando el usuario diga:
+- "agrega un feature a bitacora"
+- "actualiza el feature en bitacora"
+- "feature update"
 
-1. **El usuario debe haber hecho `ship` con Claude Code primero**. Si no confirma explicitamente con "ya hice ship", "ya shippeé", "ya commiteé" o similar, PREGUNTAR:
-   > "¿Ya hiciste el ship con Claude Code? Necesito que el commit este registrado para tomar el ID."
+→ El usuario NO hizo ship aun. Estamos iterando un cambio. Agregamos/actualizamos
+fila marcada como `[FEATURE WIP]` (sin commit ID). Multiple actualizaciones permitidas.
 
-2. **El usuario debe adjuntar una imagen** del informe de estrategia de TradingView con las metricas. Si no hay imagen, PREGUNTAR:
-   > "¿Me puedes mandar el screenshot del informe de estrategia con las metricas (trades, profit, drawdown, win rate)?"
+### Modo C: Feature aprobado (ship + graduacion)
+Cuando el usuario diga:
+- "feature aprobado, hagamos bitacora"
+- "feature aprobado"
+- "aprobado, registra"
 
-3. NO PROCEDER hasta tener ambas cosas (ship confirmado + imagen).
+→ El usuario hizo ship del feature. La fila `[FEATURE WIP]` se REEMPLAZA por una
+fila permanente con commit ID. El feature "graduo".
+
+## Pre-condiciones por modo
+
+### Modo A (entrada shippeada):
+1. Usuario debe confirmar ship explicitamente. Si no, PREGUNTAR:
+   > "¿Ya hiciste el ship con Claude Code? Necesito el commit ID."
+2. Usuario debe adjuntar imagen. Si no, PREGUNTAR.
+
+### Modo B (feature WIP):
+1. **NO requiere ship** — el feature esta en experimentacion
+2. Usuario debe adjuntar imagen
+3. Si ya hay una fila `[FEATURE WIP]` activa, esa se ACTUALIZA (no se agrega otra)
+4. Si no hay feature activo, agregar fila nueva con `[FEATURE WIP]`
+
+### Modo C (feature aprobado):
+1. Usuario debe haber hecho ship. Si no, PREGUNTAR.
+2. Usuario debe adjuntar imagen final
+3. La fila `[FEATURE WIP]` activa se TRANSFORMA: se le pone commit ID, se quita el
+   marker WIP, queda como entrada permanente
 
 ## Ubicacion del archivo
 
@@ -76,21 +108,37 @@ Resumen de 1-2 lineas con lo principal que se implemento en ese commit. Tomar co
 Ejemplo: "Refactor multi-tier: 3 niveles independientes (macro/medium/micro), BK solo en 1A/1B, cortes visuales por interseccion."
 
 ### Paso 5: Calcular delta vs entrada anterior
-Si hay entrada previa en bitacora.md, calcular:
+**Importante**: el delta SIEMPRE se calcula vs la ultima entrada SHIPPEADA (no vs otra feature WIP).
+
+Si hay entrada previa shippeada en bitacora.md, calcular:
 - Δ profit USD (positivo = mejora, negativo = empeora)
 - Δ profit %
 - Δ win rate
 - Δ profit factor
+- Δ drawdown
+- Δ trades
 
-### Paso 6: Append entrada a la tabla
-Agregar fila al final de la tabla en `bitacora.md` con este formato:
+### Paso 6: Agregar/actualizar fila en la tabla
+
+#### Modo A (shippeada):
+Append fila al final con commit ID real:
+```markdown
+| 2026-05-01 | 4de4717 | timezone local + purge | 188 | +6,028.16 | +0.60% | 38.83% | 0.38% | 1.20 | — |
+```
+
+#### Modo B (feature WIP):
+- Si NO existe fila `[FEATURE WIP]`: agregar nueva fila al final con `[FEATURE WIP]` en columna Commit.
+- Si YA existe fila `[FEATURE WIP]`: ACTUALIZAR esa fila (mismas metricas y delta nuevo). NO agregar otra.
 
 ```markdown
-| Fecha | Commit | Cambio | Trades | Profit USD | Profit % | Win % | DD % | PF | Δ vs anterior |
-|---|---|---|---|---|---|---|---|---|---|
-| 2026-05-01 | 4de4717 | timezone local + purge detection | 188 | +6,028.16 | +0.60% | 38.83% | 0.38% | 1.20 | — (primera entrada) |
-| 2026-05-02 | abc1234 | refactor multi-tier | 152 | +7,250.00 | +0.72% | 42.10% | 0.31% | 1.45 | +1,221.84 USD ↑ |
+| 2026-05-01 | [FEATURE WIP] | filtro HTF room hard 1.5 ATR | 195 | +6,428.41 | +0.64% | 38.97% | 0.38% | 1.27 | +400.25 USD ↑ |
 ```
+
+#### Modo C (feature aprobado):
+TRANSFORMAR la fila `[FEATURE WIP]` existente:
+- Reemplazar `[FEATURE WIP]` por commit ID real
+- Actualizar metricas con la imagen final
+- Recalcular delta vs ultima shippeada (no la propia feature)
 
 ### Paso 7: Mostrar resumen de progreso
 Despues de guardar, mostrar al usuario:

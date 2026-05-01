@@ -3,6 +3,7 @@ strategy("TL Rejections - MTF", shorttitle="TLS", overlay=true,
          max_lines_count=500, max_boxes_count=500, max_labels_count=500,
          initial_capital=1000000, currency=currency.USD,
          default_qty_type=strategy.fixed, default_qty_value=1,
+         margin_long=0.5, margin_short=0.5,
          process_orders_on_close=true)
 // NOTA: max_lines_count=500 es el MAXIMO permitido por Pine v6.
 // Cuando se excede, TV purga lineas viejas silenciosamente.
