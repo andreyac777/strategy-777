@@ -11,10 +11,14 @@
             "id": "47f5a020d7b89cf1",
             "type": "leaf",
             "state": {
-              "type": "graph",
-              "state": {},
-              "icon": "lucide-git-fork",
-              "title": "Graph view"
+              "type": "markdown",
+              "state": {
+                "file": "strategy/bitacora.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "bitacora"
             }
           }
         ]
@@ -178,6 +182,9 @@
   },
   "active": "47f5a020d7b89cf1",
   "lastOpenFiles": [
+    "strategy/bitacora.md",
+    "claude/bitacora/SKILL.md",
+    "claude/bitacora",
     "claude/strategy-debug/SKILL.md",
     "claude/strategy-debug",
     "strategy/trendlines-strategy.md",
@@ -203,8 +210,6 @@
     "claude-skills-opensource/forex-gold/tradermonty/scenario-analyzer.md",
     "claude-skills-opensource/forex-gold/tradermonty/pair-trade-screener.md",
     "claude-skills-opensource/forex-gold/tradermonty/institutional-flow-tracker.md",
-    "claude-skills-opensource/forex-gold/tradermonty/sector-analyst.md",
-    "claude-skills-opensource/forex-gold/tradermonty/stanley-druckenmiller-investment.md",
     "claude-skills-opensource/forex-gold/mql-developer/references",
     "claude-skills-opensource/forex-gold/tradermonty",
     "claude-skills-opensource/forex-gold/mql-developer",
@@ -212,7 +217,6 @@
     "claude-skills-opensource/forex-gold",
     "claude-skills-opensource/ml-training",
     "claude-skills-opensource/crypto-trading",
-    "claude-skills-opensource/ai-ml",
-    "claude-skills-opensource"
+    "claude-skills-opensource/ai-ml"
   ]
 }
