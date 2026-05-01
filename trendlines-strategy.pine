@@ -4,6 +4,9 @@ strategy("TL Rejections - MTF", shorttitle="TLS", overlay=true,
          initial_capital=1000000, currency=currency.USD,
          default_qty_type=strategy.fixed, default_qty_value=1,
          process_orders_on_close=true)
+// NOTA: max_lines_count=500 es el MAXIMO permitido por Pine v6.
+// Cuando se excede, TV purga lineas viejas silenciosamente.
+// Por eso hay safety code que recrea TL/BK lines cada barra si fueron purgadas.
 
 // =============================================================================
 // INPUTS
@@ -78,21 +81,30 @@ int    i_minScore   = 0         // score minimo entrada (0 = sin filtro adiciona
 float  i_htfRoomMinATR = 3.0    // distancia minima al siguiente HTF level para sumar "room to run"
 
 var GRP_SES = "Sesiones"
-i_asiaStartH = input.int(0,  "Asia - Inicio UTC", minval=0, maxval=23, group=GRP_SES)
-i_asiaEndH   = input.int(7,  "Asia - Fin UTC",    minval=0, maxval=23, group=GRP_SES)
-i_ldStartH   = input.int(7,  "LD   - Inicio UTC", minval=0, maxval=23, group=GRP_SES)
-i_ldEndH     = input.int(12, "LD   - Fin UTC",    minval=0, maxval=23, group=GRP_SES)
-i_nyStartH   = input.int(12, "NY   - Inicio UTC", minval=0, maxval=23, group=GRP_SES)
-i_nyEndH     = input.int(17, "NY   - Fin UTC",    minval=0, maxval=23, group=GRP_SES)
+// Sesiones globales fijas en UTC (no editables - son los horarios reales del mercado)
+// Asia (Tokio): 0-7 UTC | London: 7-12 UTC | NY: 12-17 UTC
+int ASIA_START_UTC = 0
+int ASIA_END_UTC   = 7
+int LD_START_UTC   = 7
+int LD_END_UTC     = 12
+int NY_START_UTC   = 12
+int NY_END_UTC     = 17
+
 i_showSesLbl = input.bool(true, "Etiquetas de sesion", group=GRP_SES)
 i_filterSes  = input.string("LD+NY", "Sesion para senales",
                options=["Todas", "LD", "NY", "LD+NY"], group=GRP_SES)
-i_tradeStart = input.int(13, "Horario operativo - Inicio (UTC)", minval=0, maxval=23, group=GRP_SES,
-               tooltip="UTC-6: 7am local = 13 UTC | UTC-5: 7am = 12 UTC")
+
+// Horario operativo en hora LOCAL del usuario.
+// NOTA: Pine Script no puede leer el timezone seleccionado en TradingView (es client-side).
+// Si configuras tu UTC offset aqui, debe coincidir con el de TradingView (esquina inferior derecha).
+i_userUtcOffset = input.int(-6, "Tu UTC offset (debe coincidir con TradingView)", minval=-12, maxval=14, group=GRP_SES,
+               tooltip="Mexico=-6 | Colombia/Peru=-5 | Venezuela/Bolivia=-4 | Argentina/Chile/Brasil=-3. Si TradingView muestra UTC-6 abajo a la derecha, dejas -6.")
+i_tradeStart = input.int(7,  "Horario operativo - Inicio (hora local)", minval=0, maxval=23, group=GRP_SES,
+               tooltip="Hora LOCAL en tu timezone (no UTC). Por defecto 7am.")
+i_tradeEnd   = input.int(11, "Horario operativo - Fin    (hora local)", minval=0, maxval=23, group=GRP_SES,
+               tooltip="Hora LOCAL en tu timezone. Por defecto 11am.")
 i_showTradeHrs = input.bool(true, "Lineas verticales en horario operativo", group=GRP_SES,
                tooltip="Dibuja una linea blanca segmentada al inicio y al fin de tu ventana operativa diaria.")
-i_tradeEnd   = input.int(17, "Horario operativo - Fin    (UTC)", minval=0, maxval=23, group=GRP_SES,
-               tooltip="UTC-6: 11am local = 17 UTC")
 
 var GRP_RISK = "Gestion de Riesgo"
 i_riskUSD    = input.float(60.0, "Riesgo fijo por operacion (USD)", minval=1.0, step=5.0, group=GRP_RISK,
@@ -131,14 +143,16 @@ i_colHTF2L = input.color(color.new(#03A9F4,  0),    "HTF2 soporte (4H)",     gro
 // =============================================================================
 // SESIONES
 // =============================================================================
-int _utcH = math.floor(time / 3600000) % 24
+int _utcH      = math.floor(time / 3600000) % 24
+// Hora local del usuario calculada desde UTC + offset (manejo correcto de negativos)
+int _localHour = ((_utcH + i_userUtcOffset) % 24 + 24) % 24
 
 f_inSes(int s, int e) =>
     (s < e ? (_utcH >= s and _utcH < e) : (_utcH >= s or _utcH < e))
 
-bool _inAsia = f_inSes(i_asiaStartH, i_asiaEndH)
-bool _inLD   = f_inSes(i_ldStartH,   i_ldEndH)
-bool _inNY   = f_inSes(i_nyStartH,   i_nyEndH)
+bool _inAsia = f_inSes(ASIA_START_UTC, ASIA_END_UTC)
+bool _inLD   = f_inSes(LD_START_UTC,   LD_END_UTC)
+bool _inNY   = f_inSes(NY_START_UTC,   NY_END_UTC)
 
 bool _asiaOpen = _inAsia and not _inAsia[1]
 bool _ldOpen   = _inLD   and not _inLD[1]
@@ -213,7 +227,8 @@ bool _sesOK       = switch i_filterSes
     "NY"    => _inNY
     "LD+NY" => _inLD or _inNY
     =>         true
-bool _inTradeHours = _utcH >= i_tradeStart and _utcH < i_tradeEnd
+// Trading hours en hora LOCAL del usuario (definida por i_userUtcOffset)
+bool _inTradeHours = _localHour >= i_tradeStart and _localHour < i_tradeEnd
 
 // =============================================================================
 // PIVOTES Y TRENDLINES (best-fit, igual que trendlines.pine)
@@ -221,16 +236,26 @@ bool _inTradeHours = _utcH >= i_tradeStart and _utcH < i_tradeEnd
 float atrVal = ta.atr(14)
 float _tol   = atrVal * i_atrMult
 
-// Lineas verticales blancas segmentadas marcando inicio/fin de horario operativo
+// Lineas verticales blancas segmentadas marcando inicio/fin de horario operativo.
+// FIX line accumulation: usa buffer circular de 10 lineas (5 dias x 2 lines/dia).
+// Asi no se acumulan indefinidamente y comen el limite max_lines_count=500.
+var line[] _hrLines = array.new<line>(0)
+int _hrMaxLines = 10
+
 if i_showTradeHrs
     bool _hrStart = _inTradeHours and not _inTradeHours[1]
     bool _hrEnd   = not _inTradeHours and _inTradeHours[1]
     if _hrStart or _hrEnd
         float _hrTop = ta.highest(high, 500) + atrVal * 5
         float _hrBot = ta.lowest(low, 500) - atrVal * 5
-        line.new(bar_index, _hrBot, bar_index, _hrTop,
-                 color=color.new(color.white, 30),
-                 width=1, style=line.style_dashed)
+        line _newHrLine = line.new(bar_index, _hrBot, bar_index, _hrTop,
+                                    color=color.new(color.white, 30),
+                                    width=1, style=line.style_dashed)
+        array.push(_hrLines, _newHrLine)
+        // Si excedimos el buffer, borrar la mas vieja
+        if array.size(_hrLines) > _hrMaxLines
+            line _oldHrLine = array.shift(_hrLines)
+            line.delete(_oldHrLine)
 
 float _pivSrcH = i_useBodyPivots ? math.max(open, close) : high
 float _pivSrcL = i_useBodyPivots ? math.min(open, close) : low
@@ -297,6 +322,8 @@ var label _lbl3B = na,   var label _lbl3A = na
 var label _lbl2B = na,   var label _lbl2A = na
 var label _lbl1B = na,   var label _lbl1A = na
 var label _dbgH  = na,   var label _dbgL  = na
+var label _dbgLine = na   // debug estado de lineas (1 sola, se actualiza cada barra)
+var table _dbgTable = na  // debug tabla de estado de TODAS las lineas (esquina del chart)
 var label _dbgBK = na
 var label _lblH1B = na,  var label _lblH1A = na
 var label _lblH4B = na,  var label _lblH4A = na
@@ -477,11 +504,22 @@ var float _prev_h1sP2 = float(na)
 var float _prev_h2rP2 = float(na)
 var float _prev_h2sP2 = float(na)
 
+// Detectar purge silencioso de Pine para HTF lines via line.get_x1 (na si purgada)
+int  _htf1H_x1Safe = na(_htf1H_line) ? int(na) : line.get_x1(_htf1H_line)
+bool _htf1H_purged = not na(_htf1H_line) and na(_htf1H_x1Safe)
+int  _htf1L_x1Safe = na(_htf1L_line) ? int(na) : line.get_x1(_htf1L_line)
+bool _htf1L_purged = not na(_htf1L_line) and na(_htf1L_x1Safe)
+int  _htf2H_x1Safe = na(_htf2H_line) ? int(na) : line.get_x1(_htf2H_line)
+bool _htf2H_purged = not na(_htf2H_line) and na(_htf2H_x1Safe)
+int  _htf2L_x1Safe = na(_htf2L_line) ? int(na) : line.get_x1(_htf2L_line)
+bool _htf2L_purged = not na(_htf2L_line) and na(_htf2L_x1Safe)
+
 // Fix Pine quirk: na(_h1rP2) handle - en primera ejecucion _prev=na hace que != na devuelva na (no true)
-if not na(_h1rP2) and not na(_h1rP1) and (na(_prev_h1rP2) or _h1rP2 != _prev_h1rP2)
+// Recrear linea si: pivot cambio O linea fue purgada por max_lines_count
+if not na(_h1rP2) and not na(_h1rP1) and (na(_prev_h1rP2) or _h1rP2 != _prev_h1rP2 or _htf1H_purged)
     line.delete(_htf1H_line)
     _htf1H_line := line.new(_h1rT1, _h1rP1, _h1rT2, _h1rP2,
-                            xloc=xloc.bar_time, extend=extend.both,
+                            xloc=xloc.bar_time, extend=extend.right,
                             color=i_colHTF1H, width=3, style=line.style_dashed)
     label.delete(_lblH1B)
     _lblH1B := label.new(bar_index + 3, _h1rP2, "H1B",
@@ -489,10 +527,10 @@ if not na(_h1rP2) and not na(_h1rP1) and (na(_prev_h1rP2) or _h1rP2 != _prev_h1r
                          style=label.style_label_left, size=size.normal)
     _prev_h1rP2 := _h1rP2
 
-if not na(_h1sP2) and not na(_h1sP1) and (na(_prev_h1sP2) or _h1sP2 != _prev_h1sP2)
+if not na(_h1sP2) and not na(_h1sP1) and (na(_prev_h1sP2) or _h1sP2 != _prev_h1sP2 or _htf1L_purged)
     line.delete(_htf1L_line)
     _htf1L_line := line.new(_h1sT1, _h1sP1, _h1sT2, _h1sP2,
-                            xloc=xloc.bar_time, extend=extend.both,
+                            xloc=xloc.bar_time, extend=extend.right,
                             color=i_colHTF1L, width=3, style=line.style_dashed)
     label.delete(_lblH1A)
     _lblH1A := label.new(bar_index + 3, _h1sP2, "H1A",
@@ -500,10 +538,10 @@ if not na(_h1sP2) and not na(_h1sP1) and (na(_prev_h1sP2) or _h1sP2 != _prev_h1s
                          style=label.style_label_left, size=size.normal)
     _prev_h1sP2 := _h1sP2
 
-if not na(_h2rP2) and not na(_h2rP1) and (na(_prev_h2rP2) or _h2rP2 != _prev_h2rP2)
+if not na(_h2rP2) and not na(_h2rP1) and (na(_prev_h2rP2) or _h2rP2 != _prev_h2rP2 or _htf2H_purged)
     line.delete(_htf2H_line)
     _htf2H_line := line.new(_h2rT1, _h2rP1, _h2rT2, _h2rP2,
-                            xloc=xloc.bar_time, extend=extend.both,
+                            xloc=xloc.bar_time, extend=extend.right,
                             color=i_colHTF2H, width=4, style=line.style_solid)
     label.delete(_lblH4B)
     _lblH4B := label.new(bar_index + 3, _h2rP2, "H4B",
@@ -511,10 +549,10 @@ if not na(_h2rP2) and not na(_h2rP1) and (na(_prev_h2rP2) or _h2rP2 != _prev_h2r
                          style=label.style_label_left, size=size.normal)
     _prev_h2rP2 := _h2rP2
 
-if not na(_h2sP2) and not na(_h2sP1) and (na(_prev_h2sP2) or _h2sP2 != _prev_h2sP2)
+if not na(_h2sP2) and not na(_h2sP1) and (na(_prev_h2sP2) or _h2sP2 != _prev_h2sP2 or _htf2L_purged)
     line.delete(_htf2L_line)
     _htf2L_line := line.new(_h2sT1, _h2sP1, _h2sT2, _h2sP2,
-                            xloc=xloc.bar_time, extend=extend.both,
+                            xloc=xloc.bar_time, extend=extend.right,
                             color=i_colHTF2L, width=4, style=line.style_solid)
     label.delete(_lblH4A)
     _lblH4A := label.new(bar_index + 3, _h2sP2, "H4A",
@@ -805,9 +843,13 @@ float _prvH_now = f_proj(_b1H_prv, _v1H_prv, _b2H_prv, _v2H_prv)
 float _curL_now = f_proj(_b1L_cur, _v1L_cur, _b2L_cur, _v2L_cur)
 float _prvL_now = f_proj(_b1L_prv, _v1L_prv, _b2L_prv, _v2L_prv)
 
-// Safety global: si los state vars indican TL valida pero la linea fue eliminada
-// (BK creation, auto-purge por max_lines_count, etc.), recrearla cada barra.
-if _scH_cur >= 1 and not na(_curH_now) and na(_tlH_cur) and not na(_b1H_cur) and not na(_b2H_cur)
+// Safety global: detectar purge silencioso de Pine via line.get_x1 (na si purgada)
+int  _tlH_curX1Safe   = na(_tlH_cur) ? int(na) : line.get_x1(_tlH_cur)
+bool _tlH_curPurged   = not na(_tlH_cur) and na(_tlH_curX1Safe)
+int  _tlL_curX1Safe   = na(_tlL_cur) ? int(na) : line.get_x1(_tlL_cur)
+bool _tlL_curPurged   = not na(_tlL_cur) and na(_tlL_curX1Safe)
+
+if _scH_cur >= 1 and not na(_curH_now) and (na(_tlH_cur) or _tlH_curPurged) and not na(_b1H_cur) and not na(_b2H_cur)
     _tlH_cur := line.new(_b1H_cur, _v1H_cur, _b2H_cur, _v2H_cur,
                           color=color.new(i_colH, f_tlAlpha(_scH_cur)),
                           width=_scH_cur >= i_minTouches ? 2 : 1, extend=extend.right)
@@ -815,13 +857,26 @@ if _scH_cur >= 1 and not na(_curH_now) and na(_tlH_cur) and not na(_b1H_cur) and
         _lbl1B := label.new(bar_index + 3, _v2H_cur, "1B",
                              color=color.new(i_colH, 70), textcolor=i_colH,
                              style=label.style_label_left, size=size.small)
-if _scL_cur >= 1 and not na(_curL_now) and na(_tlL_cur) and not na(_b1L_cur) and not na(_b2L_cur)
+if _scL_cur >= 1 and not na(_curL_now) and (na(_tlL_cur) or _tlL_curPurged) and not na(_b1L_cur) and not na(_b2L_cur)
     _tlL_cur := line.new(_b1L_cur, _v1L_cur, _b2L_cur, _v2L_cur,
                           color=color.new(i_colL, f_tlAlpha(_scL_cur)),
                           width=_scL_cur >= i_minTouches ? 2 : 1, extend=extend.right)
     if na(_lbl1A)
         _lbl1A := label.new(bar_index + 3, _v2L_cur, "1A",
                              color=color.new(i_colL, 70), textcolor=i_colL,
+                             style=label.style_label_left, size=size.small)
+
+// Safety BK: detectar purge real con line.get_x1 (retorna na si la linea fue eliminada).
+// Si state vars son validas pero linea fue purgada, recrear SOLO entonces (sin flood).
+int  _bkX1Test    = na(_tlBK_cur) ? int(na) : line.get_x1(_tlBK_cur)
+bool _bkLinePurged = not na(_tlBK_cur) and na(_bkX1Test)
+if _scBK_cur >= 1 and not na(_b1BK_cur) and not na(_b2BK_cur) and (na(_tlBK_cur) or _bkLinePurged)
+    _tlBK_cur := line.new(_b1BK_cur, _v1BK_cur, _b2BK_cur, _v2BK_cur,
+                          color=color.new(i_colBK, f_tlAlpha(_scBK_cur)),
+                          width=2, style=line.style_dashed, extend=extend.right)
+    if na(_lbl3BK)
+        _lbl3BK := label.new(bar_index + 3, _v2BK_cur, "1BK",
+                             color=color.new(i_colBK, 70), textcolor=i_colBK,
                              style=label.style_label_left, size=size.small)
 
 // Cleanup AGRESIVO: si dos slots tienen MISMA DIRECCION (slope similar) o COMPARTEN
@@ -832,17 +887,16 @@ if _scL_cur >= 1 and not na(_curL_now) and na(_tlL_cur) and not na(_b1L_cur) and
 float _curSlopeH_cln = not na(_b1H_cur) and not na(_b2H_cur) and _b2H_cur > _b1H_cur ? (_v2H_cur - _v1H_cur) / float(_b2H_cur - _b1H_cur) : float(na)
 float _prvSlopeH_cln = not na(_b1H_prv) and not na(_b2H_prv) and _b2H_prv > _b1H_prv ? (_v2H_prv - _v1H_prv) / float(_b2H_prv - _b1H_prv) : float(na)
 float _oldSlopeH_cln = not na(_b1H_old) and not na(_b2H_old) and _b2H_old > _b1H_old ? (_v2H_old - _v1H_old) / float(_b2H_old - _b1H_old) : float(na)
-float _curHprojCln = f_proj(_b1H_cur, _v1H_cur, _b2H_cur, _v2H_cur)
-float _prvHprojCln = f_proj(_b1H_prv, _v1H_prv, _b2H_prv, _v2H_prv)
-float _oldHprojCln = f_proj(_b1H_old, _v1H_old, _b2H_old, _v2H_old)
-float _slopeTolH   = atrVal * 0.05  // tolerancia slope (ATR/bar)
-float _levelTolH   = atrVal * 0.5   // tolerancia level (ATR)
+// (Removidas _curHprojCln/_prvHprojCln/_oldHprojCln: cleanup ya no usa nivel)
+// CLEANUP RELAJADO: solo borra si las dos lineas tienen MISMA PENDIENTE.
+// Si comparten nivel pero diferente pendiente = lineas distintas, mantener ambas.
+// Esto preserva mas lineas vivas para que mejora #1 (3-slot picker) tenga opciones.
+float _slopeTolH   = atrVal * 0.02  // mas estricto que antes (0.05) = elimina menos
 
-// 1B vs 2B: si redundantes, borra 2B (la mas vieja del par)
+// 1B vs 2B: solo borra si MISMA PENDIENTE (no por nivel)
 if not na(_tlH_prv) and not na(_curSlopeH_cln) and not na(_prvSlopeH_cln)
     bool _sameSlopeH12 = math.abs(_curSlopeH_cln - _prvSlopeH_cln) < _slopeTolH
-    bool _sameLevelH12 = not na(_curHprojCln) and not na(_prvHprojCln) and math.abs(_curHprojCln - _prvHprojCln) < _levelTolH
-    if _sameSlopeH12 or _sameLevelH12
+    if _sameSlopeH12
         line.delete(_tlH_prv)
         label.delete(_lbl2B)
         _tlH_prv := na
@@ -852,11 +906,10 @@ if not na(_tlH_prv) and not na(_curSlopeH_cln) and not na(_prvSlopeH_cln)
         _bkH_cnt_prv := 0
         _lbl2B := na
 
-// 1B vs 3B: si redundantes, borra 3B
+// 1B vs 3B: solo borra si MISMA PENDIENTE
 if not na(_tlH_old) and not na(_curSlopeH_cln) and not na(_oldSlopeH_cln)
     bool _sameSlopeH13 = math.abs(_curSlopeH_cln - _oldSlopeH_cln) < _slopeTolH
-    bool _sameLevelH13 = not na(_curHprojCln) and not na(_oldHprojCln) and math.abs(_curHprojCln - _oldHprojCln) < _levelTolH
-    if _sameSlopeH13 or _sameLevelH13
+    if _sameSlopeH13
         line.delete(_tlH_old)
         label.delete(_lbl3B)
         _tlH_old := na
@@ -865,11 +918,10 @@ if not na(_tlH_old) and not na(_curSlopeH_cln) and not na(_oldSlopeH_cln)
         _scH_old  := 0
         _lbl3B := na
 
-// 2B vs 3B: si redundantes, borra 3B (la mas vieja)
+// 2B vs 3B: solo borra si MISMA PENDIENTE
 if not na(_tlH_prv) and not na(_tlH_old) and not na(_prvSlopeH_cln) and not na(_oldSlopeH_cln)
     bool _sameSlopeH23 = math.abs(_prvSlopeH_cln - _oldSlopeH_cln) < _slopeTolH
-    bool _sameLevelH23 = not na(_prvHprojCln) and not na(_oldHprojCln) and math.abs(_prvHprojCln - _oldHprojCln) < _levelTolH
-    if _sameSlopeH23 or _sameLevelH23
+    if _sameSlopeH23
         line.delete(_tlH_old)
         label.delete(_lbl3B)
         _tlH_old := na
@@ -882,14 +934,11 @@ if not na(_tlH_prv) and not na(_tlH_old) and not na(_prvSlopeH_cln) and not na(_
 float _curSlopeL_cln = not na(_b1L_cur) and not na(_b2L_cur) and _b2L_cur > _b1L_cur ? (_v2L_cur - _v1L_cur) / float(_b2L_cur - _b1L_cur) : float(na)
 float _prvSlopeL_cln = not na(_b1L_prv) and not na(_b2L_prv) and _b2L_prv > _b1L_prv ? (_v2L_prv - _v1L_prv) / float(_b2L_prv - _b1L_prv) : float(na)
 float _oldSlopeL_cln = not na(_b1L_old) and not na(_b2L_old) and _b2L_old > _b1L_old ? (_v2L_old - _v1L_old) / float(_b2L_old - _b1L_old) : float(na)
-float _curLprojCln = f_proj(_b1L_cur, _v1L_cur, _b2L_cur, _v2L_cur)
-float _prvLprojCln = f_proj(_b1L_prv, _v1L_prv, _b2L_prv, _v2L_prv)
-float _oldLprojCln = f_proj(_b1L_old, _v1L_old, _b2L_old, _v2L_old)
+// (Removidas _curLprojCln/_prvLprojCln/_oldLprojCln: cleanup ya no usa nivel)
 
 if not na(_tlL_prv) and not na(_curSlopeL_cln) and not na(_prvSlopeL_cln)
     bool _sameSlopeL12 = math.abs(_curSlopeL_cln - _prvSlopeL_cln) < _slopeTolH
-    bool _sameLevelL12 = not na(_curLprojCln) and not na(_prvLprojCln) and math.abs(_curLprojCln - _prvLprojCln) < _levelTolH
-    if _sameSlopeL12 or _sameLevelL12
+    if _sameSlopeL12
         line.delete(_tlL_prv)
         label.delete(_lbl2A)
         _tlL_prv := na
@@ -901,8 +950,7 @@ if not na(_tlL_prv) and not na(_curSlopeL_cln) and not na(_prvSlopeL_cln)
 
 if not na(_tlL_old) and not na(_curSlopeL_cln) and not na(_oldSlopeL_cln)
     bool _sameSlopeL13 = math.abs(_curSlopeL_cln - _oldSlopeL_cln) < _slopeTolH
-    bool _sameLevelL13 = not na(_curLprojCln) and not na(_oldLprojCln) and math.abs(_curLprojCln - _oldLprojCln) < _levelTolH
-    if _sameSlopeL13 or _sameLevelL13
+    if _sameSlopeL13
         line.delete(_tlL_old)
         label.delete(_lbl3A)
         _tlL_old := na
@@ -913,8 +961,7 @@ if not na(_tlL_old) and not na(_curSlopeL_cln) and not na(_oldSlopeL_cln)
 
 if not na(_tlL_prv) and not na(_tlL_old) and not na(_prvSlopeL_cln) and not na(_oldSlopeL_cln)
     bool _sameSlopeL23 = math.abs(_prvSlopeL_cln - _oldSlopeL_cln) < _slopeTolH
-    bool _sameLevelL23 = not na(_prvLprojCln) and not na(_oldLprojCln) and math.abs(_prvLprojCln - _oldLprojCln) < _levelTolH
-    if _sameSlopeL23 or _sameLevelL23
+    if _sameSlopeL23
         line.delete(_tlL_old)
         label.delete(_lbl3A)
         _tlL_old := na
@@ -1032,6 +1079,117 @@ if not na(_prvL_now) and close < _prvL_now - _bkMinDist and _volOK and _bodyBelo
     _bkL_cnt_prv += 1
 else
     _bkL_cnt_prv := 0
+
+// =============================================================================
+// DEBUG TABLE: estado de TODAS las lineas en una tabla esquina del chart
+// =============================================================================
+if i_backtesting
+    if na(_dbgTable)
+        _dbgTable := table.new(position.bottom_right, 5, 12,
+                               bgcolor=color.new(color.black, 20),
+                               border_width=1, border_color=color.new(color.gray, 50))
+        // Headers
+        table.cell(_dbgTable, 0, 0, "LINE",   text_color=color.yellow, bgcolor=color.new(color.gray, 70), text_size=size.small)
+        table.cell(_dbgTable, 1, 0, "Ref",    text_color=color.yellow, bgcolor=color.new(color.gray, 70), text_size=size.small)
+        table.cell(_dbgTable, 2, 0, "x1",     text_color=color.yellow, bgcolor=color.new(color.gray, 70), text_size=size.small)
+        table.cell(_dbgTable, 3, 0, "Alive",  text_color=color.yellow, bgcolor=color.new(color.gray, 70), text_size=size.small)
+        table.cell(_dbgTable, 4, 0, "Score",  text_color=color.yellow, bgcolor=color.new(color.gray, 70), text_size=size.small)
+
+    // Helper inline para checkear cada linea
+    int _dbT_tlH_x1   = na(_tlH_cur)    ? int(na) : line.get_x1(_tlH_cur)
+    int _dbT_tlHp_x1  = na(_tlH_prv)    ? int(na) : line.get_x1(_tlH_prv)
+    int _dbT_tlHo_x1  = na(_tlH_old)    ? int(na) : line.get_x1(_tlH_old)
+    int _dbT_tlL_x1   = na(_tlL_cur)    ? int(na) : line.get_x1(_tlL_cur)
+    int _dbT_tlLp_x1  = na(_tlL_prv)    ? int(na) : line.get_x1(_tlL_prv)
+    int _dbT_tlLo_x1  = na(_tlL_old)    ? int(na) : line.get_x1(_tlL_old)
+    int _dbT_bk_x1    = na(_tlBK_cur)   ? int(na) : line.get_x1(_tlBK_cur)
+    int _dbT_h1H_x1   = na(_htf1H_line) ? int(na) : line.get_x1(_htf1H_line)
+    int _dbT_h1L_x1   = na(_htf1L_line) ? int(na) : line.get_x1(_htf1L_line)
+    int _dbT_h2H_x1   = na(_htf2H_line) ? int(na) : line.get_x1(_htf2H_line)
+    int _dbT_h2L_x1   = na(_htf2L_line) ? int(na) : line.get_x1(_htf2L_line)
+
+    // Helper para "alive" status
+    f_aliveStatus(line ln, int x1) =>
+        bool _alive = not na(ln) and not na(x1)
+        [_alive ? "YES" : "NO", _alive ? color.lime : color.red]
+    [_a1, _c1]   = f_aliveStatus(_tlH_cur,    _dbT_tlH_x1)
+    [_a2, _c2]   = f_aliveStatus(_tlH_prv,    _dbT_tlHp_x1)
+    [_a3, _c3]   = f_aliveStatus(_tlH_old,    _dbT_tlHo_x1)
+    [_a4, _c4]   = f_aliveStatus(_tlL_cur,    _dbT_tlL_x1)
+    [_a5, _c5]   = f_aliveStatus(_tlL_prv,    _dbT_tlLp_x1)
+    [_a6, _c6]   = f_aliveStatus(_tlL_old,    _dbT_tlLo_x1)
+    [_a7, _c7]   = f_aliveStatus(_tlBK_cur,   _dbT_bk_x1)
+    [_a8, _c8]   = f_aliveStatus(_htf1H_line, _dbT_h1H_x1)
+    [_a9, _c9]   = f_aliveStatus(_htf1L_line, _dbT_h1L_x1)
+    [_a10, _c10] = f_aliveStatus(_htf2H_line, _dbT_h2H_x1)
+    [_a11, _c11] = f_aliveStatus(_htf2L_line, _dbT_h2L_x1)
+
+    // Llenar filas
+    table.cell(_dbgTable, 0, 1, "1B (H cur)", text_color=color.white, text_size=size.small)
+    table.cell(_dbgTable, 1, 1, na(_tlH_cur) ? "NA" : "ok", text_color=color.white, text_size=size.small)
+    table.cell(_dbgTable, 2, 1, na(_dbT_tlH_x1) ? "-" : str.tostring(_dbT_tlH_x1), text_color=color.white, text_size=size.small)
+    table.cell(_dbgTable, 3, 1, _a1, text_color=_c1, text_size=size.small)
+    table.cell(_dbgTable, 4, 1, str.tostring(_scH_cur), text_color=color.white, text_size=size.small)
+
+    table.cell(_dbgTable, 0, 2, "2B (H prv)", text_color=color.white, text_size=size.small)
+    table.cell(_dbgTable, 1, 2, na(_tlH_prv) ? "NA" : "ok", text_color=color.white, text_size=size.small)
+    table.cell(_dbgTable, 2, 2, na(_dbT_tlHp_x1) ? "-" : str.tostring(_dbT_tlHp_x1), text_color=color.white, text_size=size.small)
+    table.cell(_dbgTable, 3, 2, _a2, text_color=_c2, text_size=size.small)
+    table.cell(_dbgTable, 4, 2, str.tostring(_scH_prv), text_color=color.white, text_size=size.small)
+
+    table.cell(_dbgTable, 0, 3, "3B (H old)", text_color=color.white, text_size=size.small)
+    table.cell(_dbgTable, 1, 3, na(_tlH_old) ? "NA" : "ok", text_color=color.white, text_size=size.small)
+    table.cell(_dbgTable, 2, 3, na(_dbT_tlHo_x1) ? "-" : str.tostring(_dbT_tlHo_x1), text_color=color.white, text_size=size.small)
+    table.cell(_dbgTable, 3, 3, _a3, text_color=_c3, text_size=size.small)
+    table.cell(_dbgTable, 4, 3, str.tostring(_scH_old), text_color=color.white, text_size=size.small)
+
+    table.cell(_dbgTable, 0, 4, "1A (L cur)", text_color=color.white, text_size=size.small)
+    table.cell(_dbgTable, 1, 4, na(_tlL_cur) ? "NA" : "ok", text_color=color.white, text_size=size.small)
+    table.cell(_dbgTable, 2, 4, na(_dbT_tlL_x1) ? "-" : str.tostring(_dbT_tlL_x1), text_color=color.white, text_size=size.small)
+    table.cell(_dbgTable, 3, 4, _a4, text_color=_c4, text_size=size.small)
+    table.cell(_dbgTable, 4, 4, str.tostring(_scL_cur), text_color=color.white, text_size=size.small)
+
+    table.cell(_dbgTable, 0, 5, "2A (L prv)", text_color=color.white, text_size=size.small)
+    table.cell(_dbgTable, 1, 5, na(_tlL_prv) ? "NA" : "ok", text_color=color.white, text_size=size.small)
+    table.cell(_dbgTable, 2, 5, na(_dbT_tlLp_x1) ? "-" : str.tostring(_dbT_tlLp_x1), text_color=color.white, text_size=size.small)
+    table.cell(_dbgTable, 3, 5, _a5, text_color=_c5, text_size=size.small)
+    table.cell(_dbgTable, 4, 5, str.tostring(_scL_prv), text_color=color.white, text_size=size.small)
+
+    table.cell(_dbgTable, 0, 6, "3A (L old)", text_color=color.white, text_size=size.small)
+    table.cell(_dbgTable, 1, 6, na(_tlL_old) ? "NA" : "ok", text_color=color.white, text_size=size.small)
+    table.cell(_dbgTable, 2, 6, na(_dbT_tlLo_x1) ? "-" : str.tostring(_dbT_tlLo_x1), text_color=color.white, text_size=size.small)
+    table.cell(_dbgTable, 3, 6, _a6, text_color=_c6, text_size=size.small)
+    table.cell(_dbgTable, 4, 6, str.tostring(_scL_old), text_color=color.white, text_size=size.small)
+
+    table.cell(_dbgTable, 0, 7, "BK", text_color=color.white, text_size=size.small)
+    table.cell(_dbgTable, 1, 7, na(_tlBK_cur) ? "NA" : "ok", text_color=color.white, text_size=size.small)
+    table.cell(_dbgTable, 2, 7, na(_dbT_bk_x1) ? "-" : str.tostring(_dbT_bk_x1), text_color=color.white, text_size=size.small)
+    table.cell(_dbgTable, 3, 7, _a7, text_color=_c7, text_size=size.small)
+    table.cell(_dbgTable, 4, 7, str.tostring(_scBK_cur), text_color=color.white, text_size=size.small)
+
+    table.cell(_dbgTable, 0, 8, "HTF1B", text_color=color.white, text_size=size.small)
+    table.cell(_dbgTable, 1, 8, na(_htf1H_line) ? "NA" : "ok", text_color=color.white, text_size=size.small)
+    table.cell(_dbgTable, 2, 8, na(_dbT_h1H_x1) ? "-" : str.tostring(_dbT_h1H_x1), text_color=color.white, text_size=size.small)
+    table.cell(_dbgTable, 3, 8, _a8, text_color=_c8, text_size=size.small)
+    table.cell(_dbgTable, 4, 8, "-", text_color=color.white, text_size=size.small)
+
+    table.cell(_dbgTable, 0, 9, "HTF1A", text_color=color.white, text_size=size.small)
+    table.cell(_dbgTable, 1, 9, na(_htf1L_line) ? "NA" : "ok", text_color=color.white, text_size=size.small)
+    table.cell(_dbgTable, 2, 9, na(_dbT_h1L_x1) ? "-" : str.tostring(_dbT_h1L_x1), text_color=color.white, text_size=size.small)
+    table.cell(_dbgTable, 3, 9, _a9, text_color=_c9, text_size=size.small)
+    table.cell(_dbgTable, 4, 9, "-", text_color=color.white, text_size=size.small)
+
+    table.cell(_dbgTable, 0, 10, "HTF4B", text_color=color.white, text_size=size.small)
+    table.cell(_dbgTable, 1, 10, na(_htf2H_line) ? "NA" : "ok", text_color=color.white, text_size=size.small)
+    table.cell(_dbgTable, 2, 10, na(_dbT_h2H_x1) ? "-" : str.tostring(_dbT_h2H_x1), text_color=color.white, text_size=size.small)
+    table.cell(_dbgTable, 3, 10, _a10, text_color=_c10, text_size=size.small)
+    table.cell(_dbgTable, 4, 10, "-", text_color=color.white, text_size=size.small)
+
+    table.cell(_dbgTable, 0, 11, "HTF4A", text_color=color.white, text_size=size.small)
+    table.cell(_dbgTable, 1, 11, na(_htf2L_line) ? "NA" : "ok", text_color=color.white, text_size=size.small)
+    table.cell(_dbgTable, 2, 11, na(_dbT_h2L_x1) ? "-" : str.tostring(_dbT_h2L_x1), text_color=color.white, text_size=size.small)
+    table.cell(_dbgTable, 3, 11, _a11, text_color=_c11, text_size=size.small)
+    table.cell(_dbgTable, 4, 11, "-", text_color=color.white, text_size=size.small)
 
 // Debug labels (solo cuando i_backtesting activo) - muestran estado de contadores BK
 if i_backtesting
