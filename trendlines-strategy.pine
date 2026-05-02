@@ -84,30 +84,27 @@ int    i_minScore   = 0         // score minimo entrada (0 = sin filtro adiciona
 float  i_htfRoomMinATR = 3.0    // distancia minima al siguiente HTF level para sumar "room to run"
 
 var GRP_SES = "Sesiones"
-// Sesiones globales fijas en UTC (no editables - son los horarios reales del mercado)
-// Asia (Tokio): 0-7 UTC | London: 7-12 UTC | NY: 12-17 UTC
-int ASIA_START_UTC = 0
-int ASIA_END_UTC   = 7
-int LD_START_UTC   = 7
-int LD_END_UTC     = 12
-int NY_START_UTC   = 12
-int NY_END_UTC     = 17
+// Sesiones operativas convertidas a hora LOCAL segun i_userUtcOffset.
+// Para UTC-6:
+// Asia/Tokyo: 18:00-03:00 | London: 02:00-11:00 | NY: 07:00-16:00
+// Overlap London+NY: 07:00-11:00
 
 i_showSesLbl = input.bool(true, "Etiquetas de sesion", group=GRP_SES)
 i_filterSes  = input.string("LD+NY", "Sesion para senales",
-               options=["Todas", "LD", "NY", "LD+NY"], group=GRP_SES)
+               options=["Todas", "Asia", "LD", "NY", "Asia+LD", "LD+NY", "Asia+LD+NY", "Manual"], group=GRP_SES,
+               tooltip="Filtra senales por sesion en tu hora local. Manual usa i_tradeStart/i_tradeEnd.")
 
 // Horario operativo en hora LOCAL del usuario.
 // NOTA: Pine Script no puede leer el timezone seleccionado en TradingView (es client-side).
 // Si configuras tu UTC offset aqui, debe coincidir con el de TradingView (esquina inferior derecha).
 i_userUtcOffset = input.int(-6, "Tu UTC offset (debe coincidir con TradingView)", minval=-12, maxval=14, group=GRP_SES,
-               tooltip="Mexico=-6 | Colombia/Peru=-5 | Venezuela/Bolivia=-4 | Argentina/Chile/Brasil=-3. Si TradingView muestra UTC-6 abajo a la derecha, dejas -6.")
-i_tradeStart = input.int(7,  "Horario operativo - Inicio (hora local)", minval=0, maxval=23, group=GRP_SES,
-               tooltip="Hora LOCAL en tu timezone (no UTC). Por defecto 7am.")
-i_tradeEnd   = input.int(11, "Horario operativo - Fin    (hora local)", minval=0, maxval=23, group=GRP_SES,
-               tooltip="Hora LOCAL en tu timezone. Por defecto 11am.")
-i_showTradeHrs = input.bool(true, "Lineas verticales en horario operativo", group=GRP_SES,
-               tooltip="Dibuja una linea blanca segmentada al inicio y al fin de tu ventana operativa diaria.")
+               tooltip="Costa Rica/UTC-6=-6 | Colombia/Peru=-5 | Venezuela/Bolivia=-4 | Argentina/Chile/Brasil=-3. Si TradingView muestra UTC-6 abajo a la derecha, dejas -6.")
+i_tradeStart = input.int(7,  "Manual - Inicio (hora local)", minval=0, maxval=23, group=GRP_SES,
+               tooltip="Solo aplica si 'Sesion para senales' = Manual.")
+i_tradeEnd   = input.int(11, "Manual - Fin (hora local)", minval=0, maxval=23, group=GRP_SES,
+               tooltip="Solo aplica si 'Sesion para senales' = Manual.")
+i_showTradeHrs = input.bool(true, "Fondo de horario operativo", group=GRP_SES,
+               tooltip="Pinta el fondo cuando la sesion/filtro seleccionado esta operativo.")
 
 var GRP_RISK = "Gestion de Riesgo"
 i_riskUSD    = input.float(60.0, "Riesgo fijo por operacion (USD)", minval=1.0, step=5.0, group=GRP_RISK,
@@ -147,12 +144,15 @@ int _utcH      = math.floor(time / 3600000) % 24
 // Hora local del usuario calculada desde UTC + offset (manejo correcto de negativos)
 int _localHour = ((_utcH + i_userUtcOffset) % 24 + 24) % 24
 
-f_inSes(int s, int e) =>
-    (s < e ? (_utcH >= s and _utcH < e) : (_utcH >= s or _utcH < e))
+// Funcion para sesiones en hora LOCAL. Soporta sesiones que cruzan medianoche.
+f_inLocalSes(int s, int e) =>
+    (s < e ? (_localHour >= s and _localHour < e) : (_localHour >= s or _localHour < e))
 
-bool _inAsia = f_inSes(ASIA_START_UTC, ASIA_END_UTC)
-bool _inLD   = f_inSes(LD_START_UTC,   LD_END_UTC)
-bool _inNY   = f_inSes(NY_START_UTC,   NY_END_UTC)
+// Horarios operativos principales expresados en hora LOCAL UTC-6.
+// Si cambias i_userUtcOffset, estos siguen representando los mismos bloques locales visuales.
+bool _inAsia = f_inLocalSes(18, 3)   // Asia/Tokyo: 6:00 PM - 3:00 AM UTC-6
+bool _inLD   = f_inLocalSes(2, 11)   // London:     2:00 AM - 11:00 AM UTC-6
+bool _inNY   = f_inLocalSes(7, 16)   // New York:   7:00 AM - 4:00 PM UTC-6
 
 bool _asiaOpen = _inAsia and not _inAsia[1]
 bool _ldOpen   = _inLD   and not _inLD[1]
@@ -222,13 +222,21 @@ if i_showSesLbl
         label _ln = label.new(bar_index, high, "NY", style=label.style_label_down,
                      color=color.new(#00AAAA, 40), textcolor=color.white, size=size.tiny)
 
-bool _sesOK       = switch i_filterSes
-    "LD"    => _inLD
-    "NY"    => _inNY
-    "LD+NY" => _inLD or _inNY
-    =>         true
-// Trading hours en hora LOCAL del usuario (definida por i_userUtcOffset)
-bool _inTradeHours = _localHour >= i_tradeStart and _localHour < i_tradeEnd
+bool _manualHours = i_tradeStart < i_tradeEnd ? (_localHour >= i_tradeStart and _localHour < i_tradeEnd) : (_localHour >= i_tradeStart or _localHour < i_tradeEnd)
+
+bool _sesOK = switch i_filterSes
+    "Asia"       => _inAsia
+    "LD"         => _inLD
+    "NY"         => _inNY
+    "Asia+LD"    => _inAsia or _inLD
+    "LD+NY"      => _inLD or _inNY
+    "Asia+LD+NY" => _inAsia or _inLD or _inNY
+    "Manual"     => _manualHours
+    =>              true
+
+// Trading hours operativo final. Las entradas usan _sesOK and _inTradeHours;
+// por eso igualamos _inTradeHours al filtro seleccionado para no bloquear LD/NY con 7-11 manual.
+bool _inTradeHours = _sesOK
 
 // =============================================================================
 // PIVOTES Y TRENDLINES (best-fit, igual que trendlines.pine)
@@ -239,7 +247,7 @@ float _tol   = atrVal * i_atrMult
 // Horario operativo: bgcolor() en lugar de lineas verticales.
 // Zero lineas creadas (no consume el budget max_lines_count=500), Pine lo
 // maneja como fill nativo. Visualmente mas claro que solo marcas de inicio/fin.
-bgcolor(i_showTradeHrs and _inTradeHours ? color.new(color.white, 92) : na, title="Horario operativo")
+bgcolor(i_showTradeHrs and _inTradeHours ? color.new(color.white, 92) : na, title="Horario operativo / sesion seleccionada")
 
 float _pivSrcH = i_useBodyPivots ? math.max(open, close) : high
 float _pivSrcL = i_useBodyPivots ? math.min(open, close) : low
