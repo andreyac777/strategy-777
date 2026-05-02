@@ -1,0 +1,1109 @@
+//@version=6
+strategy("TL Rejections - MTF", shorttitle="TLS", overlay=true,
+         max_lines_count=500, max_boxes_count=500, max_labels_count=500,
+         initial_capital=1000000, currency=currency.USD,
+         default_qty_type=strategy.fixed, default_qty_value=1,
+         margin_long=0.5, margin_short=0.5,
+         process_orders_on_close=true)
+
+// =============================================================================
+// REFACTOR MAYOR: solo 1H (eliminado H4, BK, 2/3 tiers, 5m pivots)
+// =============================================================================
+// Las 4 lineas (H1A, H1B, 1A, 1B) son TODAS basadas en pivotes 1H:
+//   H1B: best-fit en 10 HH mas tocados de las ultimas 130 barras 1H (techo macro)
+//   H1A: best-fit en 10 LL mas tocados de las ultimas 130 barras 1H (piso macro)
+//   1B:  mismo pero en window de ultimas 40 barras 1H (resistencia reciente)
+//   1A:  mismo pero en window de ultimas 40 barras 1H (soporte reciente)
+// Los pivotes 1H usados se visualizan como puntos en el chart.
+// Entradas: rejection wick en 5m sobre cualquier linea proyectada.
+
+// =============================================================================
+// PARAMETROS FIJOS
+// =============================================================================
+int   _curTfSec    = timeframe.in_seconds(timeframe.period)
+int   i_minTouches = 2          // toques minimos de TL para considerar valida
+float i_atrMult    = 0.5        // tolerancia de toque en xATR
+float i_wickRatio  = 0.15       // wick minimo del rango
+int   i_minSpacing = 20         // bars minimos entre toques de la TL en 5m
+
+// Mejoras expertas (Linda Raschke / Edwards-Magee / Bulkowski)
+bool  i_useRecencyBias     = true
+float i_recencyDecay       = 0.99
+float i_maxSlopeATR        = 0.5
+bool  i_useBodyPivots      = false
+bool  i_forceExtremeAnchor = true
+bool  i_applyFatigue       = true
+
+// HTF (1H) - parametros de detection y windows
+string i_htfTF         = "60"   // 1 hora
+int    i_htfPivPer     = input.int(5, "HTF pivot strength", minval=2, maxval=10, step=1, group="Trendlines", tooltip="Bajalo (3) para detectar mas pivotes en la misma ventana")
+int    i_htfMaxPivots  = input.int(15, "HTF max pivotes (HH y LL)", minval=5, maxval=30, step=1, group="Trendlines")
+int    i_htfBigWindow  = input.int(130, "HTF big window (1H bars) - H1A/H1B", minval=50, maxval=500, step=10, group="Trendlines")
+int    i_htfSmallWindow = input.int(40, "HTF small window (1H bars) - 1A/1B", minval=20, maxval=200, step=5, group="Trendlines")
+float  i_minPromATR    = 2.0    // pivote 1H debe sobresalir N x ATR vs vecinos
+
+// Confluencia / TP estructural
+// i_htfTol: multiplicador de ATR_1H para tolerancia de touches en H1B/H1A/1B/1A
+// Mas alto = mas pivotes cuentan como touch (lineas con mas score)
+// Tunear en vivo desde inputs para encontrar el sweet spot visual
+float  i_htfTol     = input.float(1.0, "HTF tolerance (xATR_1H)", minval=0.3, maxval=5.0, step=0.1, group="Trendlines")
+int    i_minScore   = 0
+float  i_htfRoomMinATR = 3.0
+
+// === CONSTRAINTS DE POSICIONAMIENTO ===
+// i_priceBreakATR: cuanto puede el precio "romper" la linea sin invalidarla.
+// Resistencias (H1B/1B) deben estar arriba del close, pero permitimos que el close
+// las haya rebasado por hasta i_priceBreakATR * ATR_1H. Si pasa de eso, se rechaza
+// el candidato (la linea perdio significado).
+float  i_priceBreakATR = input.float(0.5, "Maximo break de precio (xATR_1H)", minval=0.0, maxval=3.0, step=0.1, group="Trendlines", tooltip="Cuantos ATR_1H puede romper el precio la linea antes de invalidarla. 0 = nunca puede romperla.")
+// i_minLineSepATR: separacion minima requerida entre H1A y H1B en ATR_1H.
+// Evita que las dos lineas macro se toquen o crucen.
+float  i_minLineSepATR = input.float(2.0, "Separacion minima H1A-H1B (xATR_1H)", minval=0.0, maxval=10.0, step=0.5, group="Trendlines", tooltip="Distancia minima vertical entre H1A (piso) y H1B (techo). 0 = sin restriccion.")
+
+// =============================================================================
+// SESIONES
+// =============================================================================
+var GRP_SES = "Sesiones"
+int ASIA_START_UTC = 0,  int ASIA_END_UTC = 7
+int LD_START_UTC   = 7,  int LD_END_UTC   = 12
+int NY_START_UTC   = 12, int NY_END_UTC   = 17
+
+i_showSesLbl = input.bool(true, "Etiquetas de sesion", group=GRP_SES)
+i_filterSes  = input.string("LD+NY", "Sesion para senales",
+               options=["Todas", "LD", "NY", "LD+NY"], group=GRP_SES)
+i_userUtcOffset = input.int(-6, "Tu UTC offset (debe coincidir con TradingView)", minval=-12, maxval=14, group=GRP_SES)
+i_tradeStart = input.int(7,  "Horario operativo - Inicio (hora local)", minval=0, maxval=23, group=GRP_SES)
+i_tradeEnd   = input.int(11, "Horario operativo - Fin    (hora local)", minval=0, maxval=23, group=GRP_SES)
+i_showTradeHrs = input.bool(true, "Resaltar horario operativo (bgcolor)", group=GRP_SES)
+
+var GRP_RISK = "Gestion de Riesgo"
+i_riskUSD    = input.float(60.0, "Riesgo fijo por operacion (USD)", minval=1.0, step=5.0, group=GRP_RISK)
+
+// Algoritmo de gestion de riesgo (FIJOS)
+float i_slBuf        = 0.3
+bool  i_useStructTP  = true
+float i_minStructRR  = 1.0
+float i_tpStructBuf  = 0.5
+float i_maxTpAtr     = 4.0
+float i_minRRentry   = 1.2
+
+var GRP_VIS = "Visual"
+i_col1B    = input.color(#00E5FF, "Color 1B (resistencia reciente)",  group=GRP_VIS)
+i_col1A    = input.color(#B388FF, "Color 1A (soporte reciente)",      group=GRP_VIS)
+i_colH1B   = input.color(color.new(#E040FB, 0), "Color H1B (techo macro)", group=GRP_VIS)
+i_colH1A   = input.color(color.new(#BA68C8, 0), "Color H1A (piso macro)",  group=GRP_VIS)
+i_colPivH  = input.color(color.new(#00E5FF, 30), "Color pivote HH 1H", group=GRP_VIS)
+i_colPivL  = input.color(color.new(#B388FF, 30), "Color pivote LL 1H", group=GRP_VIS)
+i_colAsia  = input.color(color.new(color.white, 90), "Asia fondo", group=GRP_VIS)
+i_colLD    = input.color(color.new(#9B59B6, 87),     "LD fondo",   group=GRP_VIS)
+i_colNY    = input.color(color.new(#00EFEF, 90),     "NY fondo",   group=GRP_VIS)
+
+// =============================================================================
+// SESIONES (logica)
+// =============================================================================
+int _utcH      = math.floor(time / 3600000) % 24
+int _localHour = ((_utcH + i_userUtcOffset) % 24 + 24) % 24
+
+f_inSes(int s, int e) =>
+    (s < e ? (_utcH >= s and _utcH < e) : (_utcH >= s or _utcH < e))
+
+bool _inAsia = f_inSes(ASIA_START_UTC, ASIA_END_UTC)
+bool _inLD   = f_inSes(LD_START_UTC,   LD_END_UTC)
+bool _inNY   = f_inSes(NY_START_UTC,   NY_END_UTC)
+
+bool _asiaOpen = _inAsia and not _inAsia[1]
+bool _ldOpen   = _inLD   and not _inLD[1]
+bool _nyOpen   = _inNY   and not _inNY[1]
+
+var float _asiaH = float(na), var float _asiaL = float(na)
+var float _ldH   = float(na), var float _ldL   = float(na)
+var float _nyH   = float(na), var float _nyL   = float(na)
+
+if _asiaOpen
+    _asiaH := high
+    _asiaL := low
+if _inAsia
+    _asiaH := math.max(_asiaH, high)
+    _asiaL := math.min(_asiaL, low)
+if _ldOpen
+    _ldH := high
+    _ldL := low
+if _inLD
+    _ldH := math.max(_ldH, high)
+    _ldL := math.min(_ldL, low)
+if _nyOpen
+    _nyH := high
+    _nyL := low
+if _inNY
+    _nyH := math.max(_nyH, high)
+    _nyL := math.min(_nyL, low)
+
+var box _bAsia = na
+var box _bLD   = na
+var box _bNY   = na
+
+if _asiaOpen
+    _bAsia := box.new(bar_index, high, bar_index, low,
+                      border_color=color.new(color.white, 75), bgcolor=i_colAsia)
+if _inAsia and not na(_bAsia)
+    box.set_right(_bAsia,  bar_index)
+    box.set_top(_bAsia,    _asiaH)
+    box.set_bottom(_bAsia, _asiaL)
+if _ldOpen
+    _bLD := box.new(bar_index, high, bar_index, low,
+                    border_color=color.new(#9B59B6, 55), bgcolor=i_colLD)
+if _inLD and not na(_bLD)
+    box.set_right(_bLD,  bar_index)
+    box.set_top(_bLD,    _ldH)
+    box.set_bottom(_bLD, _ldL)
+if _nyOpen
+    _bNY := box.new(bar_index, high, bar_index, low,
+                    border_color=color.new(#00AAAA, 55), bgcolor=i_colNY)
+if _inNY and not na(_bNY)
+    box.set_right(_bNY,  bar_index)
+    box.set_top(_bNY,    _nyH)
+    box.set_bottom(_bNY, _nyL)
+
+if i_showSesLbl
+    if _asiaOpen
+        label.new(bar_index, high, "Asia", style=label.style_label_down,
+                  color=color.new(color.white, 60), textcolor=color.gray, size=size.tiny)
+    if _ldOpen
+        label.new(bar_index, high, "LD", style=label.style_label_down,
+                  color=color.new(#9B59B6, 40), textcolor=color.white, size=size.tiny)
+    if _nyOpen
+        label.new(bar_index, high, "NY", style=label.style_label_down,
+                  color=color.new(#00AAAA, 40), textcolor=color.white, size=size.tiny)
+
+bool _sesOK = switch i_filterSes
+    "LD"    => _inLD
+    "NY"    => _inNY
+    "LD+NY" => _inLD or _inNY
+    =>         true
+bool _inTradeHours = _localHour >= i_tradeStart and _localHour < i_tradeEnd
+
+// =============================================================================
+// ATR + Horario operativo
+// =============================================================================
+float atrVal = ta.atr(14)
+float _tol   = atrVal * i_atrMult
+
+// ATR de 1H para tolerancia de pivotes HTF (mas grandes que ATR 5m)
+// Usa i_htfTol (default 1.5) para ser mas generoso que i_atrMult (0.5)
+float _atr1H = request.security(syminfo.tickerid, "60", ta.atr(14))
+float _tolHTF = na(_atr1H) ? _tol : _atr1H * i_htfTol
+
+bgcolor(i_showTradeHrs and _inTradeHours ? color.new(color.white, 92) : na, title="Horario operativo")
+
+// =============================================================================
+// HELPERS
+// =============================================================================
+
+f_tlAlpha(int sc) =>
+    math.max(0, 80 - sc * 25)
+
+// f_projT: proyecta linea por timestamps a current time
+f_projT(int t1, float v1, int t2, float v2, int targetTime) =>
+    (not na(t2) and not na(v2) ?
+        (not na(t1) and not na(v1) and t2 > t1 ?
+            v2 + (v2 - v1) / float(t2 - t1) * float(targetTime - t2) :
+            v2) :
+        float(na))
+
+// f_bestFitT: best-fit usando arrays de tiempos (ms) y valores
+f_bestFitT(int[] times, float[] vals, float ftol, bool isHigh, float maxSlopeMs, float decayRate, bool useExtreme) =>
+    int N = na(times) ? 0 : array.size(times)
+    int   bestT1 = int(na),   bestT2 = int(na)
+    float bestV1 = float(na), bestV2 = float(na)
+    int   bestScore = 0
+    float bestWeighted = -1.0
+
+    int   extremeIdx = -1
+    float extremeVal = isHigh ? -1e10 : 1e10
+    if useExtreme and N > 0
+        for kk = 0 to N - 1
+            float vkk = array.get(vals, kk)
+            int   tkk = array.get(times, kk)
+            if not na(vkk) and not na(tkk)
+                if isHigh and vkk > extremeVal
+                    extremeVal := vkk
+                    extremeIdx := kk
+                if not isHigh and vkk < extremeVal
+                    extremeVal := vkk
+                    extremeIdx := kk
+
+    if N >= 2
+        for i = 0 to N - 2
+            int   ti = array.get(times, i)
+            float vi = array.get(vals, i)
+            if na(ti) or na(vi)
+                continue
+            for j = i + 1 to N - 1
+                int   tj = array.get(times, j)
+                float vj = array.get(vals, j)
+                if na(tj) or na(vj) or ti == tj
+                    continue
+                if useExtreme and extremeIdx >= 0 and i != extremeIdx and j != extremeIdx
+                    continue
+                float sl = (vj - vi) / float(tj - ti)
+                if maxSlopeMs > 0 and math.abs(sl) > maxSlopeMs
+                    continue
+                int   sc = 0
+                float weighted = 0.0
+                for k = 0 to N - 1
+                    int   tk = array.get(times, k)
+                    float vk = array.get(vals, k)
+                    if na(tk) or na(vk)
+                        continue
+                    float predicted = vi + sl * float(tk - ti)
+                    if math.abs(vk - predicted) <= ftol
+                        sc += 1
+                        bool isAnchor = (tk == ti) or (tk == tj)
+                        float w = 1.0
+                        if not isAnchor and decayRate < 1.0
+                            int ageBars = math.max(0, math.round((time - tk) / 3600000.0))
+                            w := math.pow(decayRate, ageBars)
+                        weighted += w
+                int  spanCur = tj - ti
+                int  spanBst = na(bestT1) or na(bestT2) ? 0 : bestT2 - bestT1
+                bool longerSpan = spanCur > spanBst
+                // PRIORIDAD: maximizar touches (sc) > weighted (recencia) > span
+                bool better = sc > bestScore
+                              or (sc == bestScore and weighted > bestWeighted)
+                              or (sc == bestScore and weighted == bestWeighted and longerSpan)
+                if better
+                    bestScore := sc
+                    bestWeighted := weighted
+                    bestT1 := ti
+                    bestV1 := vi
+                    bestT2 := tj
+                    bestV2 := vj
+    [bestT1, bestV1, bestT2, bestV2, bestScore]
+
+// =============================================================================
+// f_bestFitTV2: best-fit con constraints adicionales
+// - refPrice/refTime: si no son na, fuerza que la linea en refTime no este "del
+//   lado equivocado" del precio mas alla de priceCushion (en unidades absolutas).
+//   Para isHigh=true (resistencia): line@refTime >= refPrice - priceCushion
+//   Para isHigh=false (soporte):    line@refTime <= refPrice + priceCushion
+// - otherLineValue/minSep: si otherLineValue no es na, requiere que
+//   |line@refTime - otherLineValue| >= minSep
+// =============================================================================
+f_bestFitTV2(int[] times, float[] vals, float ftol, bool isHigh, float maxSlopeMs, float decayRate, bool useExtreme, float refPrice, int refTime, float priceCushion, float otherLineValue, float minSep) =>
+    int N = na(times) ? 0 : array.size(times)
+    int   bestT1 = int(na),   bestT2 = int(na)
+    float bestV1 = float(na), bestV2 = float(na)
+    int   bestScore = 0
+    float bestWeighted = -1.0
+
+    int   extremeIdx = -1
+    float extremeVal = isHigh ? -1e10 : 1e10
+    if useExtreme and N > 0
+        for kk = 0 to N - 1
+            float vkk = array.get(vals, kk)
+            int   tkk = array.get(times, kk)
+            if not na(vkk) and not na(tkk)
+                if isHigh and vkk > extremeVal
+                    extremeVal := vkk
+                    extremeIdx := kk
+                if not isHigh and vkk < extremeVal
+                    extremeVal := vkk
+                    extremeIdx := kk
+
+    if N >= 2
+        for i = 0 to N - 2
+            int   ti = array.get(times, i)
+            float vi = array.get(vals, i)
+            if na(ti) or na(vi)
+                continue
+            for j = i + 1 to N - 1
+                int   tj = array.get(times, j)
+                float vj = array.get(vals, j)
+                if na(tj) or na(vj) or ti == tj
+                    continue
+                if useExtreme and extremeIdx >= 0 and i != extremeIdx and j != extremeIdx
+                    continue
+                float sl = (vj - vi) / float(tj - ti)
+                if maxSlopeMs > 0 and math.abs(sl) > maxSlopeMs
+                    continue
+
+                // CONSTRAINT: lado del precio en refTime con cushion
+                // Resistencia: line >= refPrice - cushion (precio puede romper hasta cushion)
+                // Soporte:     line <= refPrice + cushion
+                float predictedNow = float(na)
+                if not na(refPrice) and not na(refTime)
+                    predictedNow := vi + sl * float(refTime - ti)
+                    if isHigh and predictedNow < refPrice - priceCushion
+                        continue
+                    if not isHigh and predictedNow > refPrice + priceCushion
+                        continue
+
+                // CONSTRAINT: separacion minima vs otra linea
+                if not na(otherLineValue) and not na(refTime) and minSep > 0
+                    if na(predictedNow)
+                        predictedNow := vi + sl * float(refTime - ti)
+                    if math.abs(predictedNow - otherLineValue) < minSep
+                        continue
+
+                int   sc = 0
+                float weighted = 0.0
+                for k = 0 to N - 1
+                    int   tk = array.get(times, k)
+                    float vk = array.get(vals, k)
+                    if na(tk) or na(vk)
+                        continue
+                    float predicted = vi + sl * float(tk - ti)
+                    if math.abs(vk - predicted) <= ftol
+                        sc += 1
+                        bool isAnchor = (tk == ti) or (tk == tj)
+                        float w = 1.0
+                        if not isAnchor and decayRate < 1.0
+                            int ageBars = math.max(0, math.round((time - tk) / 3600000.0))
+                            w := math.pow(decayRate, ageBars)
+                        weighted += w
+                int  spanCur = tj - ti
+                int  spanBst = na(bestT1) or na(bestT2) ? 0 : bestT2 - bestT1
+                bool longerSpan = spanCur > spanBst
+                bool better = sc > bestScore
+                              or (sc == bestScore and weighted > bestWeighted)
+                              or (sc == bestScore and weighted == bestWeighted and longerSpan)
+                if better
+                    bestScore := sc
+                    bestWeighted := weighted
+                    bestT1 := ti
+                    bestV1 := vi
+                    bestT2 := tj
+                    bestV2 := vj
+    [bestT1, bestV1, bestT2, bestV2, bestScore]
+
+// =============================================================================
+// f_topKLineT: regresion lineal a traves de los K pivotes mas extremos
+// (mas altos si isHigh=true, mas bajos si isHigh=false)
+// Devuelve [t1, v1, t2, v2, K_real] donde la linea pasa cerca de los K extremos
+// =============================================================================
+f_topKLineT(int[] times, float[] vals, int K, bool isHigh) =>
+    int N = na(times) ? 0 : array.size(times)
+    int   bestT1 = int(na),   bestT2 = int(na)
+    float bestV1 = float(na), bestV2 = float(na)
+    int   K_real = 0
+
+    if N >= 2
+        // Copia de pares (t, v) validos
+        var float[] _vCopy = array.new_float()
+        var int[]   _tCopy = array.new_int()
+        array.clear(_vCopy)
+        array.clear(_tCopy)
+        for i = 0 to N - 1
+            float v = array.get(vals, i)
+            int   t = array.get(times, i)
+            if not na(v) and not na(t)
+                array.push(_vCopy, v)
+                array.push(_tCopy, t)
+
+        int M = array.size(_vCopy)
+        if M >= 2
+            // Selection sort manual: extraer top-K (descending si isHigh, ascending si !isHigh)
+            int Kuse = math.min(K, M)
+            var float[] _selV = array.new_float()
+            var int[]   _selT = array.new_int()
+            array.clear(_selV)
+            array.clear(_selT)
+
+            for kk = 0 to Kuse - 1
+                int   bestIdx = -1
+                float bestVal = isHigh ? -1e10 : 1e10
+                for i = 0 to array.size(_vCopy) - 1
+                    float v = array.get(_vCopy, i)
+                    if isHigh and v > bestVal
+                        bestVal := v
+                        bestIdx := i
+                    if not isHigh and v < bestVal
+                        bestVal := v
+                        bestIdx := i
+                if bestIdx >= 0
+                    array.push(_selV, array.get(_vCopy, bestIdx))
+                    array.push(_selT, array.get(_tCopy, bestIdx))
+                    array.remove(_vCopy, bestIdx)
+                    array.remove(_tCopy, bestIdx)
+
+            K_real := array.size(_selV)
+            if K_real >= 2
+                // Least squares: y = a + b*x
+                float sumT = 0.0, sumV = 0.0, sumTV = 0.0, sumTT = 0.0
+                for i = 0 to K_real - 1
+                    float t = float(array.get(_selT, i))
+                    float v = array.get(_selV, i)
+                    sumT  += t
+                    sumV  += v
+                    sumTV += t * v
+                    sumTT += t * t
+                float meanT = sumT / float(K_real)
+                float meanV = sumV / float(K_real)
+                float denom = sumTT - float(K_real) * meanT * meanT
+                if denom != 0.0
+                    float slope = (sumTV - float(K_real) * meanT * meanV) / denom
+                    float intercept = meanV - slope * meanT
+                    // Devolver linea en el rango temporal de los seleccionados
+                    int   tMin = array.get(_selT, 0)
+                    int   tMax = array.get(_selT, 0)
+                    for i = 1 to K_real - 1
+                        int t = array.get(_selT, i)
+                        tMin := math.min(tMin, t)
+                        tMax := math.max(tMax, t)
+                    bestT1 := tMin
+                    bestT2 := tMax
+                    bestV1 := intercept + slope * float(tMin)
+                    bestV2 := intercept + slope * float(tMax)
+    [bestT1, bestV1, bestT2, bestV2, K_real]
+
+// =============================================================================
+// HTF PIVOT COLLECTION (1H)
+// =============================================================================
+// Funcion ejecutada en contexto 1H via request.security.
+// Mantiene arrays var de los ultimos N pivotes HH y LL detectados.
+// Cada nueva deteccion shift+push (FIFO).
+
+f_collectHTFPivots(int per, int N) =>
+    var float[] hPrice = array.new_float(N, float(na))
+    var int[]   hTime  = array.new_int(N, int(na))
+    var float[] lPrice = array.new_float(N, float(na))
+    var int[]   lTime  = array.new_int(N, int(na))
+
+    float ph = ta.pivothigh(high, per, per)
+    float pl = ta.pivotlow(low,  per, per)
+
+    if not na(ph)
+        array.shift(hPrice)
+        array.push(hPrice, ph)
+        array.shift(hTime)
+        array.push(hTime, time[per])
+    if not na(pl)
+        array.shift(lPrice)
+        array.push(lPrice, pl)
+        array.shift(lTime)
+        array.push(lTime, time[per])
+
+    [hPrice, hTime, lPrice, lTime]
+
+[_htfHPrice, _htfHTime, _htfLPrice, _htfLTime] = request.security(syminfo.tickerid, i_htfTF,
+    f_collectHTFPivots(i_htfPivPer, i_htfMaxPivots), lookahead=barmerge.lookahead_off)
+
+// =============================================================================
+// FILTRAR PIVOTES POR WINDOW (broad vs recent)
+// =============================================================================
+// Maneja srcTimes na internamente (devuelve arrays vacios)
+f_filterRecent(int[] srcTimes, float[] srcVals, int hourCutoff) =>
+    int[]   outTimes = array.new_int()
+    float[] outVals  = array.new_float()
+    if not na(srcTimes) and not na(srcVals)
+        int N = array.size(srcTimes)
+        int cutoffMs = time - hourCutoff * 3600000
+        if N > 0
+            for i = 0 to N - 1
+                int t = array.get(srcTimes, i)
+                float v = array.get(srcVals, i)
+                if not na(t) and not na(v) and t >= cutoffMs
+                    array.push(outTimes, t)
+                    array.push(outVals,  v)
+    [outTimes, outVals]
+
+[_pivHBigT, _pivHBigV] = f_filterRecent(_htfHTime, _htfHPrice, i_htfBigWindow)
+[_pivLBigT, _pivLBigV] = f_filterRecent(_htfLTime, _htfLPrice, i_htfBigWindow)
+[_pivHSmlT, _pivHSmlV] = f_filterRecent(_htfHTime, _htfHPrice, i_htfSmallWindow)
+[_pivLSmlT, _pivLSmlV] = f_filterRecent(_htfLTime, _htfLPrice, i_htfSmallWindow)
+
+// =============================================================================
+// VISUALIZACION DE PIVOTES 1H
+// =============================================================================
+// Redibuja cuando arrays cambian + fallback en barstate.islast.
+// FIX: comparacion correcta con na (na != x retorna na, no true).
+var label[] _pivHLbls = array.new<label>()
+var label[] _pivLLbls = array.new<label>()
+var int    _lastPivHT = int(na)
+var int    _lastPivLT = int(na)
+
+int _NhCur = na(_htfHTime) ? 0 : array.size(_htfHTime)
+int _NlCur = na(_htfLTime) ? 0 : array.size(_htfLTime)
+int _latestPivHT = _NhCur > 0 ? array.get(_htfHTime, _NhCur - 1) : int(na)
+int _latestPivLT = _NlCur > 0 ? array.get(_htfLTime, _NlCur - 1) : int(na)
+
+// Detector con manejo correcto de na:
+// - Si _lastPivHT es na y _latestPivHT no es na -> primer pivote, redraw
+// - Si ambos son numeros distintos -> nuevo pivote, redraw
+// - Si ambos iguales -> no hay cambio, skip
+bool _redrawH = (na(_lastPivHT) and not na(_latestPivHT)) or (not na(_lastPivHT) and not na(_latestPivHT) and _latestPivHT != _lastPivHT) or (barstate.islast and _NhCur > 0 and array.size(_pivHLbls) == 0)
+bool _redrawL = (na(_lastPivLT) and not na(_latestPivLT)) or (not na(_lastPivLT) and not na(_latestPivLT) and _latestPivLT != _lastPivLT) or (barstate.islast and _NlCur > 0 and array.size(_pivLLbls) == 0)
+
+if _redrawH
+    if array.size(_pivHLbls) > 0
+        for i = 0 to array.size(_pivHLbls) - 1
+            label.delete(array.get(_pivHLbls, i))
+        array.clear(_pivHLbls)
+    if _NhCur > 0
+        for i = 0 to _NhCur - 1
+            int t = array.get(_htfHTime, i)
+            float v = array.get(_htfHPrice, i)
+            if not na(t) and not na(v)
+                int pivNum = i + 1
+                // Punto cian con numero adentro: style_circle
+                array.push(_pivHLbls, label.new(t, v, str.tostring(pivNum),
+                    xloc=xloc.bar_time, style=label.style_circle,
+                    color=i_colPivH, textcolor=color.white, size=size.tiny))
+    _lastPivHT := _latestPivHT
+
+if _redrawL
+    if array.size(_pivLLbls) > 0
+        for i = 0 to array.size(_pivLLbls) - 1
+            label.delete(array.get(_pivLLbls, i))
+        array.clear(_pivLLbls)
+    if _NlCur > 0
+        for i = 0 to _NlCur - 1
+            int t = array.get(_htfLTime, i)
+            float v = array.get(_htfLPrice, i)
+            if not na(t) and not na(v)
+                int pivNum = i + 1
+                // Punto lila con numero adentro
+                array.push(_pivLLbls, label.new(t, v, str.tostring(pivNum),
+                    xloc=xloc.bar_time, style=label.style_circle,
+                    color=i_colPivL, textcolor=color.white, size=size.tiny))
+    _lastPivLT := _latestPivLT
+
+// =============================================================================
+// COMPUTAR LAS 4 LINEAS (best-fit sobre pivotes 1H filtrados)
+// =============================================================================
+float _maxSlopePerMs = i_maxSlopeATR > 0 and not na(atrVal) ? (i_maxSlopeATR * atrVal) / float(timeframe.in_seconds(timeframe.period) * 1000) : 0.0
+
+// Cushions absolutos en USD (basados en ATR_1H)
+float _priceBreak  = na(_atr1H) ? 0.0 : _atr1H * i_priceBreakATR
+float _minLineSep  = na(_atr1H) ? 0.0 : _atr1H * i_minLineSepATR
+
+// PASO 1: H1A primero (piso macro). DUAL approach (igual que H1B):
+//   (a) useExtreme=true  -> ancla en el pivote MAS BAJO (TL clasica de soporte)
+//   (b) useExtreme=false -> libre, encuentra el mejor par sin restriccion del extremo
+// Seleccion: mayor score gana; si empatan, preferimos el de SPAN MAS LARGO
+// (mas estructural, evita que el algoritmo se quede atrapado en pivotes recientes).
+[h1aT1a, h1aV1a, h1aT2a, h1aV2a, h1aSca] = f_bestFitTV2(_pivLBigT, _pivLBigV, _tolHTF, false, _maxSlopePerMs, i_recencyDecay, true,  close, time, _priceBreak, float(na), 0.0)
+[h1aT1b, h1aV1b, h1aT2b, h1aV2b, h1aScb] = f_bestFitTV2(_pivLBigT, _pivLBigV, _tolHTF, false, _maxSlopePerMs, i_recencyDecay, false, close, time, _priceBreak, float(na), 0.0)
+int _spanH1Aa = (na(h1aT1a) or na(h1aT2a)) ? 0 : math.abs(h1aT2a - h1aT1a)
+int _spanH1Ab = (na(h1aT1b) or na(h1aT2b)) ? 0 : math.abs(h1aT2b - h1aT1b)
+bool _useExtremeH1A = h1aSca > h1aScb or (h1aSca == h1aScb and _spanH1Aa >= _spanH1Ab)
+int   h1aT1 = _useExtremeH1A ? h1aT1a : h1aT1b
+float h1aV1 = _useExtremeH1A ? h1aV1a : h1aV1b
+int   h1aT2 = _useExtremeH1A ? h1aT2a : h1aT2b
+float h1aV2 = _useExtremeH1A ? h1aV2a : h1aV2b
+int   h1aSc = _useExtremeH1A ? h1aSca : h1aScb
+float h1A_now = f_projT(h1aT1, h1aV1, h1aT2, h1aV2, time)
+
+// PASO 2: H1B (techo macro) con AMBOS constraints:
+//   - precio: H1B >= close - _priceBreak
+//   - separacion: |H1B - H1A_now| >= _minLineSep
+// Misma seleccion que H1A: mayor score; si empatan, span mas largo.
+[h1bT1a, h1bV1a, h1bT2a, h1bV2a, h1bSca] = f_bestFitTV2(_pivHBigT, _pivHBigV, _tolHTF, true, _maxSlopePerMs, i_recencyDecay, true,  close, time, _priceBreak, h1A_now, _minLineSep)
+[h1bT1b, h1bV1b, h1bT2b, h1bV2b, h1bScb] = f_bestFitTV2(_pivHBigT, _pivHBigV, _tolHTF, true, _maxSlopePerMs, i_recencyDecay, false, close, time, _priceBreak, h1A_now, _minLineSep)
+int _spanH1Ba = (na(h1bT1a) or na(h1bT2a)) ? 0 : math.abs(h1bT2a - h1bT1a)
+int _spanH1Bb = (na(h1bT1b) or na(h1bT2b)) ? 0 : math.abs(h1bT2b - h1bT1b)
+bool _useExtremeH1B = h1bSca > h1bScb or (h1bSca == h1bScb and _spanH1Ba >= _spanH1Bb)
+int   h1bT1 = _useExtremeH1B ? h1bT1a : h1bT1b
+float h1bV1 = _useExtremeH1B ? h1bV1a : h1bV1b
+int   h1bT2 = _useExtremeH1B ? h1bT2a : h1bT2b
+float h1bV2 = _useExtremeH1B ? h1bV2a : h1bV2b
+int   h1bSc = _useExtremeH1B ? h1bSca : h1bScb
+float h1B_now = f_projT(h1bT1, h1bV1, h1bT2, h1bV2, time)
+
+// PASO 3: 1A y 1B (lineas recientes). Solo aplicamos filtro de precio
+// (no repulsion entre 1A y 1B porque son dinamicas y se mueven mas).
+[t1bT1, t1bV1, t1bT2, t1bV2, t1bSc] = f_bestFitTV2(_pivHSmlT, _pivHSmlV, _tolHTF, true,  _maxSlopePerMs, i_recencyDecay, true, close, time, _priceBreak, float(na), 0.0)
+[t1aT1, t1aV1, t1aT2, t1aV2, t1aSc] = f_bestFitTV2(_pivLSmlT, _pivLSmlV, _tolHTF, false, _maxSlopePerMs, i_recencyDecay, true, close, time, _priceBreak, float(na), 0.0)
+float t1B_now = f_projT(t1bT1, t1bV1, t1bT2, t1bV2, time)
+float t1A_now = f_projT(t1aT1, t1aV1, t1aT2, t1aV2, time)
+
+// =============================================================================
+// DEBUG: tabla con pivotes elegidos por cada linea
+// =============================================================================
+// Mapea timestamp del anchor al indice del pivote (1-10) en el array original.
+f_findIdxByTime(int[] arr, int t) =>
+    int idx = -1
+    if not na(arr) and not na(t)
+        int N = array.size(arr)
+        if N > 0
+            for i = 0 to N - 1
+                int v = array.get(arr, i)
+                if not na(v) and v == t
+                    idx := i + 1  // numero de pivote (1-based)
+                    break
+    idx
+
+// Devuelve "X-Y" donde X y Y son los numeros de pivote elegidos (o "-" si na)
+f_pivotsLabel(int t1, int t2, int[] sourceArr) =>
+    int i1 = f_findIdxByTime(sourceArr, t1)
+    int i2 = f_findIdxByTime(sourceArr, t2)
+    string s1 = i1 < 0 ? "-" : str.tostring(i1)
+    string s2 = i2 < 0 ? "-" : str.tostring(i2)
+    s1 + "-" + s2
+
+// Lista TODOS los pivotes (1-based) que estan dentro de `tol` de la linea (t1,v1)-(t2,v2)
+// Devuelve string "1,3,7,10" o "-" si la linea es na
+f_allTouches(int[] times, float[] vals, int t1, float v1, int t2, float v2, float tol) =>
+    string out = ""
+    if not na(t1) and not na(t2) and t1 != t2 and not na(vals) and not na(times)
+        int N = array.size(times)
+        float sl = (v2 - v1) / float(t2 - t1)
+        for k = 0 to N - 1
+            int   tk = array.get(times, k)
+            float vk = array.get(vals, k)
+            if not na(tk) and not na(vk)
+                float predicted = v1 + sl * float(tk - t1)
+                if math.abs(vk - predicted) <= tol
+                    out := out == "" ? str.tostring(k + 1) : out + "," + str.tostring(k + 1)
+    out == "" ? "-" : out
+
+var table _dbgTbl = na
+
+// Crear tabla una vez
+if na(_dbgTbl)
+    _dbgTbl := table.new(position.bottom_right, 4, 5,
+                          bgcolor=color.new(color.black, 20),
+                          border_width=1, border_color=color.new(color.gray, 50))
+    table.cell(_dbgTbl, 0, 0, "Linea",   text_color=color.yellow, bgcolor=color.new(color.gray, 70), text_size=size.small)
+    table.cell(_dbgTbl, 1, 0, "Pivotes", text_color=color.yellow, bgcolor=color.new(color.gray, 70), text_size=size.small)
+    table.cell(_dbgTbl, 2, 0, "Score",   text_color=color.yellow, bgcolor=color.new(color.gray, 70), text_size=size.small)
+    table.cell(_dbgTbl, 3, 0, "Y@now",   text_color=color.yellow, bgcolor=color.new(color.gray, 70), text_size=size.small)
+
+// Actualizar celdas cada bar (la tabla se renderea siempre, no solo en barstate.islast)
+// H1B y H1A: lista TODOS los pivotes que tocan dentro de tolerancia (no solo los 2 anchors)
+string h1bPivs = f_allTouches(_htfHTime, _htfHPrice, h1bT1, h1bV1, h1bT2, h1bV2, _tolHTF)
+string h1aPivs = f_allTouches(_htfLTime, _htfLPrice, h1aT1, h1aV1, h1aT2, h1aV2, _tolHTF)
+string t1bPivs = f_pivotsLabel(t1bT1, t1bT2, _htfHTime)
+string t1aPivs = f_pivotsLabel(t1aT1, t1aT2, _htfLTime)
+
+table.cell(_dbgTbl, 0, 1, "H1B", text_color=color.white, text_size=size.small)
+table.cell(_dbgTbl, 1, 1, h1bPivs, text_color=i_colH1B, text_size=size.small)
+table.cell(_dbgTbl, 2, 1, str.tostring(h1bSc), text_color=color.white, text_size=size.small)
+table.cell(_dbgTbl, 3, 1, na(h1B_now) ? "-" : str.tostring(h1B_now, format.mintick), text_color=color.aqua, text_size=size.small)
+
+table.cell(_dbgTbl, 0, 2, "H1A", text_color=color.white, text_size=size.small)
+table.cell(_dbgTbl, 1, 2, h1aPivs, text_color=i_colH1A, text_size=size.small)
+table.cell(_dbgTbl, 2, 2, str.tostring(h1aSc), text_color=color.white, text_size=size.small)
+table.cell(_dbgTbl, 3, 2, na(h1A_now) ? "-" : str.tostring(h1A_now, format.mintick), text_color=color.aqua, text_size=size.small)
+
+table.cell(_dbgTbl, 0, 3, "1B", text_color=color.white, text_size=size.small)
+table.cell(_dbgTbl, 1, 3, t1bPivs, text_color=i_col1B, text_size=size.small)
+table.cell(_dbgTbl, 2, 3, str.tostring(t1bSc), text_color=color.white, text_size=size.small)
+table.cell(_dbgTbl, 3, 3, na(t1B_now) ? "-" : str.tostring(t1B_now, format.mintick), text_color=color.aqua, text_size=size.small)
+
+table.cell(_dbgTbl, 0, 4, "1A", text_color=color.white, text_size=size.small)
+table.cell(_dbgTbl, 1, 4, t1aPivs, text_color=i_col1A, text_size=size.small)
+table.cell(_dbgTbl, 2, 4, str.tostring(t1aSc), text_color=color.white, text_size=size.small)
+table.cell(_dbgTbl, 3, 4, na(t1A_now) ? "-" : str.tostring(t1A_now, format.mintick), text_color=color.aqua, text_size=size.small)
+
+// =============================================================================
+// FORCE RECREATE de las 4 lineas cada bar
+// =============================================================================
+int _anchorOffset = 100
+int _tfMs = timeframe.in_seconds(timeframe.period) * 1000
+
+var line  _ln1B   = na, var line  _ln1A   = na
+var line  _lnH1B  = na, var line  _lnH1A  = na
+var label _lbl1B  = na, var label _lbl1A  = na
+var label _lblH1B = na, var label _lblH1A = na
+
+if not na(h1bT1) and not na(h1bT2) and h1bT2 > h1bT1 and not na(h1B_now)
+    float slopeMs  = (h1bV2 - h1bV1) / float(h1bT2 - h1bT1)
+    float slopeBar = slopeMs * float(_tfMs)
+    float yAnc     = h1B_now - slopeBar * float(_anchorOffset)
+    line.delete(_lnH1B)
+    _lnH1B := line.new(bar_index - _anchorOffset, yAnc, bar_index, h1B_now,
+                        color=i_colH1B, width=3, style=line.style_dashed, extend=extend.right)
+    if na(_lblH1B)
+        _lblH1B := label.new(bar_index + 3, h1B_now, "H1B",
+                              color=color.new(i_colH1B, 50), textcolor=color.white,
+                              style=label.style_label_left, size=size.normal)
+
+if not na(h1aT1) and not na(h1aT2) and h1aT2 > h1aT1 and not na(h1A_now)
+    float slopeMs  = (h1aV2 - h1aV1) / float(h1aT2 - h1aT1)
+    float slopeBar = slopeMs * float(_tfMs)
+    float yAnc     = h1A_now - slopeBar * float(_anchorOffset)
+    line.delete(_lnH1A)
+    _lnH1A := line.new(bar_index - _anchorOffset, yAnc, bar_index, h1A_now,
+                        color=i_colH1A, width=3, style=line.style_dashed, extend=extend.right)
+    if na(_lblH1A)
+        _lblH1A := label.new(bar_index + 3, h1A_now, "H1A",
+                              color=color.new(i_colH1A, 50), textcolor=color.white,
+                              style=label.style_label_left, size=size.normal)
+
+if not na(t1bT1) and not na(t1bT2) and t1bT2 > t1bT1 and not na(t1B_now)
+    float slopeMs  = (t1bV2 - t1bV1) / float(t1bT2 - t1bT1)
+    float slopeBar = slopeMs * float(_tfMs)
+    float yAnc     = t1B_now - slopeBar * float(_anchorOffset)
+    line.delete(_ln1B)
+    _ln1B := line.new(bar_index - _anchorOffset, yAnc, bar_index, t1B_now,
+                       color=color.new(i_col1B, f_tlAlpha(t1bSc)),
+                       width=t1bSc >= i_minTouches ? 2 : 1, extend=extend.right)
+    if na(_lbl1B)
+        _lbl1B := label.new(bar_index + 3, t1B_now, "1B",
+                             color=color.new(i_col1B, 70), textcolor=i_col1B,
+                             style=label.style_label_left, size=size.small)
+
+if not na(t1aT1) and not na(t1aT2) and t1aT2 > t1aT1 and not na(t1A_now)
+    float slopeMs  = (t1aV2 - t1aV1) / float(t1aT2 - t1aT1)
+    float slopeBar = slopeMs * float(_tfMs)
+    float yAnc     = t1A_now - slopeBar * float(_anchorOffset)
+    line.delete(_ln1A)
+    _ln1A := line.new(bar_index - _anchorOffset, yAnc, bar_index, t1A_now,
+                       color=color.new(i_col1A, f_tlAlpha(t1aSc)),
+                       width=t1aSc >= i_minTouches ? 2 : 1, extend=extend.right)
+    if na(_lbl1A)
+        _lbl1A := label.new(bar_index + 3, t1A_now, "1A",
+                             color=color.new(i_col1A, 70), textcolor=i_col1A,
+                             style=label.style_label_left, size=size.small)
+
+if not na(_lbl1B) and not na(t1B_now)
+    label.set_x(_lbl1B, bar_index + 3)
+    label.set_y(_lbl1B, t1B_now)
+if not na(_lbl1A) and not na(t1A_now)
+    label.set_x(_lbl1A, bar_index + 3)
+    label.set_y(_lbl1A, t1A_now)
+if not na(_lblH1B) and not na(h1B_now)
+    label.set_x(_lblH1B, bar_index + 3)
+    label.set_y(_lblH1B, h1B_now)
+if not na(_lblH1A) and not na(h1A_now)
+    label.set_x(_lblH1A, bar_index + 3)
+    label.set_y(_lblH1A, h1A_now)
+
+// =============================================================================
+// SENALES - rejection wick contra cualquiera de las 4 lineas
+// =============================================================================
+float _range  = high - low
+float _upWick = high - math.max(open, close)
+float _dnWick = math.min(open, close) - low
+
+f_bearRej(float lvl) =>
+    (not na(lvl) and _range > 0
+     and high >= lvl - _tol
+     and high <= lvl + _tol * 1.5
+     and close < lvl + _tol * 0.3
+     and _upWick / _range >= i_wickRatio)
+
+f_bullRej(float lvl) =>
+    (not na(lvl) and _range > 0
+     and low <= lvl + _tol
+     and low >= lvl - _tol * 1.5
+     and close > lvl - _tol * 0.3
+     and _dnWick / _range >= i_wickRatio)
+
+f_nearestAbove(float price, float l1, int s1, float l2, int s2) =>
+    float best   = float(na)
+    int   bestSc = 0
+    if not na(l1) and l1 > price and s1 >= i_minTouches
+        best   := l1
+        bestSc := s1
+    if not na(l2) and l2 > price and s2 >= i_minTouches and (na(best) or l2 < best)
+        best   := l2
+        bestSc := s2
+    [best, bestSc]
+
+f_nearestBelow(float price, float l1, int s1, float l2, int s2) =>
+    float best   = float(na)
+    int   bestSc = 0
+    if not na(l1) and l1 < price and s1 >= i_minTouches
+        best   := l1
+        bestSc := s1
+    if not na(l2) and l2 < price and s2 >= i_minTouches and (na(best) or l2 > best)
+        best   := l2
+        bestSc := s2
+    [best, bestSc]
+
+[_lineShort, _scShort] = f_nearestAbove(close, t1B_now, t1bSc, h1B_now, h1bSc)
+[_lineLong,  _scLong]  = f_nearestBelow(close, t1A_now, t1aSc, h1A_now, h1aSc)
+
+var bool _tradeOpen = false
+
+bool bearSig = (not na(_lineShort) and f_bearRej(_lineShort)
+                and not _tradeOpen and _sesOK and _inTradeHours)
+bool bullSig = (not na(_lineLong)  and f_bullRej(_lineLong)
+                and not _tradeOpen and _sesOK and _inTradeHours)
+
+plotshape(bearSig, "SHORT entrada", location=location.abovebar,
+          color=i_col1B, style=shape.triangledown, size=size.small)
+plotshape(bullSig, "LONG entrada",  location=location.belowbar,
+          color=i_col1A, style=shape.triangleup,   size=size.small)
+
+// =============================================================================
+// TP ESTRUCTURAL
+// =============================================================================
+f_structTPLong(float entry, float slDist, float maxDist) =>
+    float bestTarget = float(na)
+    if not na(t1B_now) and t1B_now > entry and (t1B_now - entry) <= maxDist
+        bestTarget := t1B_now
+    if not na(h1B_now) and h1B_now > entry and (h1B_now - entry) <= maxDist and (na(bestTarget) or h1B_now < bestTarget)
+        bestTarget := h1B_now
+    float adjusted = na(bestTarget) ? float(na) : bestTarget - atrVal * i_tpStructBuf
+    float minTP    = entry + slDist * i_minStructRR
+    not na(adjusted) and adjusted > minTP ? adjusted : float(na)
+
+f_structTPShort(float entry, float slDist, float maxDist) =>
+    float bestTarget = float(na)
+    if not na(t1A_now) and t1A_now < entry and (entry - t1A_now) <= maxDist
+        bestTarget := t1A_now
+    if not na(h1A_now) and h1A_now < entry and (entry - h1A_now) <= maxDist and (na(bestTarget) or h1A_now > bestTarget)
+        bestTarget := h1A_now
+    float adjusted = na(bestTarget) ? float(na) : bestTarget + atrVal * i_tpStructBuf
+    float minTP    = entry - slDist * i_minStructRR
+    not na(adjusted) and adjusted < minTP ? adjusted : float(na)
+
+// =============================================================================
+// TRADE STATE + R/R BOXES
+// =============================================================================
+var bool  trActive = false
+var box   trRisk   = na
+var box   trProfit = na
+var int   nClosed  = 0
+var float trSL     = float(na)
+var float trTP     = float(na)
+var bool  trLong   = false
+var float trEntry  = float(na)
+var int   trEntryBar = int(na)
+var line  _trSlLine  = na
+var line  _trTp2Line = na
+var line  _trTp3Line = na
+var label _trTp2Lbl  = na
+var label _trTp3Lbl  = na
+
+if trActive
+    bool _hitSL  = trLong ? low  <= trSL : high >= trSL
+    bool _hitTP  = trLong ? high >= trTP : low  <= trTP
+    bool _hrEnded = not _inTradeHours and _inTradeHours[1]
+    if _hitSL or _hitTP or _hrEnded or strategy.closedtrades > nClosed
+        box.set_right(trRisk,   bar_index)
+        box.set_right(trProfit, bar_index)
+        int _midBar = na(trEntryBar) ? bar_index : math.round((trEntryBar + bar_index) / 2)
+        if _hitTP and not na(trEntry) and not na(trTP) and not na(trSL)
+            float _slDistAbs = math.abs(trEntry - trSL)
+            float _tpDistAbs = math.abs(trTP - trEntry)
+            float _rrActual  = _slDistAbs > 0 ? _tpDistAbs / _slDistAbs : 0
+            float _profitUSD = i_riskUSD * _rrActual
+            label.new(bar_index, trTP,
+                      "+$" + str.tostring(math.round(_profitUSD)) +
+                      "  (1:" + str.tostring(_rrActual, "#.##") + ")",
+                      style=trLong ? label.style_label_down : label.style_label_up,
+                      color=color.new(#9B59B6, 15), textcolor=color.white, size=size.small)
+            if not na(_trTp2Lbl)
+                label.set_x(_trTp2Lbl, _midBar)
+            if not na(_trTp2Line)
+                line.set_x2(_trTp2Line, bar_index)
+            line.delete(_trTp3Line)
+            label.delete(_trTp3Lbl)
+            _trTp3Line := na
+            _trTp3Lbl  := na
+            line.delete(_trSlLine)
+            _trSlLine := na
+        else if _hitSL
+            label.new(bar_index, trSL,
+                      "-$" + str.tostring(math.round(i_riskUSD)),
+                      style=trLong ? label.style_label_up : label.style_label_down,
+                      color=color.new(color.white, 15), textcolor=color.black, size=size.small)
+            line.delete(_trTp2Line)
+            label.delete(_trTp2Lbl)
+            line.delete(_trTp3Line)
+            label.delete(_trTp3Lbl)
+            _trTp2Line := na
+            _trTp2Lbl  := na
+            _trTp3Line := na
+            _trTp3Lbl  := na
+        else if _hrEnded and not na(trEntry) and not na(trSL)
+            float _slDistEod = math.abs(trEntry - trSL)
+            float _qtyEod    = _slDistEod > 0 ? i_riskUSD / _slDistEod : 0
+            float _pnlEod    = (trLong ? (close - trEntry) : (trEntry - close)) * _qtyEod
+            strategy.close_all(comment="EOD")
+            label.new(bar_index, close,
+                      "EOD: " + (_pnlEod >= 0 ? "+$" : "-$") + str.tostring(math.abs(math.round(_pnlEod))),
+                      style=label.style_label_left,
+                      color=color.new(color.orange, 25), textcolor=color.white, size=size.small)
+            line.delete(_trTp2Line)
+            label.delete(_trTp2Lbl)
+            line.delete(_trTp3Line)
+            label.delete(_trTp3Lbl)
+            line.delete(_trSlLine)
+            _trTp2Line := na
+            _trTp2Lbl  := na
+            _trTp3Line := na
+            _trTp3Lbl  := na
+            _trSlLine  := na
+        else
+            line.delete(_trTp2Line)
+            label.delete(_trTp2Lbl)
+            line.delete(_trTp3Line)
+            label.delete(_trTp3Lbl)
+            line.delete(_trSlLine)
+            _trTp2Line := na
+            _trTp2Lbl  := na
+            _trTp3Line := na
+            _trTp3Lbl  := na
+            _trSlLine  := na
+        trActive   := false
+        _tradeOpen := false
+        nClosed    := strategy.closedtrades
+    else
+        box.set_right(trRisk,   bar_index)
+        box.set_right(trProfit, bar_index)
+
+// =============================================================================
+// LIMIT ORDERS
+// =============================================================================
+int MAX_PEND_BARS = 8
+
+var float _pL_e   = float(na), var float _pL_sl  = float(na), var float _pL_tp  = float(na), var float _pL_qty = float(na), var int _pL_bar = int(na)
+var float _pS_e   = float(na), var float _pS_sl  = float(na), var float _pS_tp  = float(na), var float _pS_qty = float(na), var int _pS_bar = int(na)
+
+float _slBufLim = math.max(i_slBuf, 0.7)
+
+bool _favLong = (not na(_lineLong)
+                 and _sesOK and _inTradeHours
+                 and not _tradeOpen
+                 and strategy.position_size == 0
+                 and close > _lineLong
+                 and (close - _lineLong) <= atrVal * 3.0)
+
+if _favLong
+    float _eTgt   = _lineLong + atrVal * 0.05
+    float _slTgt  = _lineLong - atrVal * _slBufLim
+    float _slD    = _eTgt - _slTgt
+    float _qtyTgt = i_riskUSD / _slD
+    float _maxD   = atrVal * i_maxTpAtr
+    float _tpStr  = i_useStructTP ? f_structTPLong(_eTgt, _slD, _maxD) : float(na)
+    float _tp2    = _eTgt + _slD * 2
+    float _tpTgt  = na(_tpStr) ? _tp2 : _tpStr
+    if (_tpTgt - _eTgt) > _maxD
+        _tpTgt := _eTgt + _maxD
+    if (_tpTgt - _eTgt) >= _slD * i_minRRentry
+        if na(_pL_bar)
+            _pL_bar := bar_index
+        _pL_e   := _eTgt
+        _pL_sl  := _slTgt
+        _pL_tp  := _tpTgt
+        _pL_qty := _qtyTgt
+        strategy.entry("LONG-L", strategy.long, qty=_qtyTgt, limit=_eTgt)
+        strategy.exit("LONG-LX", "LONG-L", stop=_slTgt, limit=_tpTgt)
+    else if not na(_pL_bar)
+        strategy.cancel("LONG-L")
+        _pL_e := na, _pL_sl := na, _pL_tp := na, _pL_qty := na, _pL_bar := na
+else if not na(_pL_bar) and strategy.position_size == 0
+    strategy.cancel("LONG-L")
+    _pL_e := na, _pL_sl := na, _pL_tp := na, _pL_qty := na, _pL_bar := na
+
+if not na(_pL_bar) and (bar_index - _pL_bar) > MAX_PEND_BARS and strategy.position_size == 0
+    strategy.cancel("LONG-L")
+    _pL_e := na, _pL_sl := na, _pL_tp := na, _pL_qty := na, _pL_bar := na
+
+bool _favShort = (not na(_lineShort)
+                  and _sesOK and _inTradeHours
+                  and not _tradeOpen
+                  and strategy.position_size == 0
+                  and close < _lineShort
+                  and (_lineShort - close) <= atrVal * 3.0)
+
+if _favShort
+    float _eTgt   = _lineShort - atrVal * 0.05
+    float _slTgt  = _lineShort + atrVal * _slBufLim
+    float _slD    = _slTgt - _eTgt
+    float _qtyTgt = i_riskUSD / _slD
+    float _maxD   = atrVal * i_maxTpAtr
+    float _tpStr  = i_useStructTP ? f_structTPShort(_eTgt, _slD, _maxD) : float(na)
+    float _tp2    = _eTgt - _slD * 2
+    float _tpTgt  = na(_tpStr) ? _tp2 : _tpStr
+    if (_eTgt - _tpTgt) > _maxD
+        _tpTgt := _eTgt - _maxD
+    if (_eTgt - _tpTgt) >= _slD * i_minRRentry
+        if na(_pS_bar)
+            _pS_bar := bar_index
+        _pS_e   := _eTgt
+        _pS_sl  := _slTgt
+        _pS_tp  := _tpTgt
+        _pS_qty := _qtyTgt
+        strategy.entry("SHORT-L", strategy.short, qty=_qtyTgt, limit=_eTgt)
+        strategy.exit("SHORT-LX", "SHORT-L", stop=_slTgt, limit=_tpTgt)
+    else if not na(_pS_bar)
+        strategy.cancel("SHORT-L")
+        _pS_e := na, _pS_sl := na, _pS_tp := na, _pS_qty := na, _pS_bar := na
+else if not na(_pS_bar) and strategy.position_size == 0
+    strategy.cancel("SHORT-L")
+    _pS_e := na, _pS_sl := na, _pS_tp := na, _pS_qty := na, _pS_bar := na
+
+if not na(_pS_bar) and (bar_index - _pS_bar) > MAX_PEND_BARS and strategy.position_size == 0
+    strategy.cancel("SHORT-L")
+    _pS_e := na, _pS_sl := na, _pS_tp := na, _pS_qty := na, _pS_bar := na
+
+// =============================================================================
+// FILL DETECTION + VISUALIZATION
+// =============================================================================
+bool _justFilled = strategy.position_size != 0 and strategy.position_size[1] == 0 and not trActive
+
+if _justFilled
+    bool   _isLong  = strategy.position_size > 0
+    float  _eFill   = strategy.position_avg_price
+    float  _slUsed  = float(na)
+    float  _tpUsed  = float(na)
+    if _isLong and not na(_pL_e)
+        _slUsed := _pL_sl
+        _tpUsed := _pL_tp
+    else if not _isLong and not na(_pS_e)
+        _slUsed := _pS_sl
+        _tpUsed := _pS_tp
+
+    if not na(_eFill) and not na(_slUsed) and not na(_tpUsed)
+        float _slDistAbs = math.abs(_eFill - _slUsed)
+        float _tp2Ref    = _isLong ? _eFill + _slDistAbs * 2 : _eFill - _slDistAbs * 2
+        float _tp3Ref    = _isLong ? _eFill + _slDistAbs * 3 : _eFill - _slDistAbs * 3
+
+        trActive   := true
+        _tradeOpen := true
+        trSL       := _slUsed
+        trTP       := _tpUsed
+        trLong     := _isLong
+        trEntry    := _eFill
+        trEntryBar := bar_index
+
+        if _isLong
+            trRisk   := box.new(bar_index, _eFill,  bar_index + 1, _slUsed,
+                                border_color=color.white,  bgcolor=color.new(color.white, 85))
+            trProfit := box.new(bar_index, _tpUsed, bar_index + 1, _eFill,
+                                border_color=#9B59B6, bgcolor=color.new(#9B59B6, 85))
+        else
+            trRisk   := box.new(bar_index, _slUsed, bar_index + 1, _eFill,
+                                border_color=color.white,  bgcolor=color.new(color.white, 85))
+            trProfit := box.new(bar_index, _eFill,  bar_index + 1, _tpUsed,
+                                border_color=#9B59B6, bgcolor=color.new(#9B59B6, 85))
+
+        line.delete(_trSlLine)
+        line.delete(_trTp2Line)
+        line.delete(_trTp3Line)
+        label.delete(_trTp2Lbl)
+        label.delete(_trTp3Lbl)
+
+        _trSlLine  := line.new(bar_index, _slUsed, bar_index + 4, _slUsed,
+                                color=color.new(color.red, 50), width=1)
+        _trTp2Line := line.new(bar_index, _tp2Ref, bar_index + 25, _tp2Ref,
+                                color=color.new(#26A69A, 40), width=2)
+        _trTp2Lbl  := label.new(bar_index + 12, _tp2Ref,
+                                "TP 1:2  $" + str.tostring(math.round(i_riskUSD * 2)),
+                                style=label.style_label_center,
+                                color=color.new(#26A69A, 45), textcolor=color.white, size=size.tiny)
+        _trTp3Line := line.new(bar_index, _tp3Ref, bar_index + 38, _tp3Ref,
+                                color=color.new(#26A69A, 65), width=1, style=line.style_dashed)
+        _trTp3Lbl  := label.new(bar_index + 19, _tp3Ref,
+                                "TP 1:3  $" + str.tostring(math.round(i_riskUSD * 3)),
+                                style=label.style_label_center,
+                                color=color.new(#26A69A, 65), textcolor=color.white, size=size.tiny)
+
+    strategy.cancel("LONG-L")
+    strategy.cancel("SHORT-L")
+    _pL_e := na, _pL_sl := na, _pL_tp := na, _pL_qty := na, _pL_bar := na
+    _pS_e := na, _pS_sl := na, _pS_tp := na, _pS_qty := na, _pS_bar := na
+
+// =============================================================================
+// ALERTAS
+// =============================================================================
+alertcondition(bearSig, "SHORT - Pivote en TL resistencia",
+               "Pivote alto confirmado sobre trendline de resistencia.")
+alertcondition(bullSig, "LONG  - Pivote en TL soporte",
+               "Pivote bajo confirmado sobre trendline de soporte.")
